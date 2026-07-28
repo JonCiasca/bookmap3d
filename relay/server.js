@@ -42,7 +42,7 @@ const DIR_FRONTEND = path.join(__dirname, "..", "frontend");
 
 const SYMBOL = (process.env.SYMBOL || "btcusdt").toLowerCase();
 const BUCKET_SIZE = Number(process.env.BUCKET_SIZE || 5); // USD por pared
-const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 60); // paredes por lado
+const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 200); // paredes por lado ($1000 c/lado con BUCKET_SIZE=5)
 const INTERVALO_ENVIO_MS = Number(process.env.INTERVALO_ENVIO_MS || 250);
 const PUERTO = Number(process.env.PORT || 8081);
 const MODO_DEMO = process.env.MODO_DEMO === "1"; // datos sinteticos, sin Binance (para probar sin red)
