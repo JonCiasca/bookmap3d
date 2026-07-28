@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: bookmap3d
+    name: book-jonflow-mdq
     runtime: node
     plan: free
+    region: frankfurt
     rootDir: relay
     buildCommand: npm install
     startCommand: npm start
