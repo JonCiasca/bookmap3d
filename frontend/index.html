@@ -33,6 +33,17 @@
   #gex .valor { font-weight: bold; }
   #gex .largo { color: #7fe0a8; }
   #gex .corto { color: #ff8a9a; }
+  #controles-zoom {
+    position: fixed; right: 12px; bottom: 16px; z-index: 10;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #controles-zoom button {
+    width: 42px; height: 42px; border-radius: 50%; border: none;
+    background: rgba(15, 25, 35, 0.75); color: #eaf6ff; font-size: 22px;
+    font-family: -apple-system, system-ui, sans-serif; line-height: 1;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  #controles-zoom button:active { background: rgba(40, 60, 80, 0.9); }
 </style>
 </head>
 <body>
@@ -48,6 +59,10 @@
   </div>
 </div>
 <div id="estado" class="caido">conectando...</div>
+<div id="controles-zoom">
+  <button id="zoom-mas" type="button" aria-label="Acercar">+</button>
+  <button id="zoom-menos" type="button" aria-label="Alejar">−</button>
+</div>
 <div id="tooltip" style="
   position: fixed; z-index: 20; display: none; pointer-events: none;
   font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
@@ -133,7 +148,11 @@ let ultimoNiveles = null;
 // -----------------------------------------------------
 const escena = new THREE.Scene();
 escena.background = new THREE.Color(0x05070a);
-escena.fog = new THREE.Fog(0x05070a, 25, 110);
+// el fog arrancaba a los 25 y ya estaba todo negro a los 110 -- con el
+// historial llegando a ~100 unidades de profundidad, la mayor parte del
+// mapa se apagaba de mas. Lo empujamos mas lejos para que las paredes del
+// fondo se sigan viendo con color, y solo el horizonte lejano se difumina.
+escena.fog = new THREE.Fog(0x05070a, 55, 200);
 
 const camara = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
 camara.position.set(0, 26, 36);
@@ -157,12 +176,78 @@ controles.dampingFactor = 0.12;
 controles.minDistance = 8;
 controles.maxDistance = 130;
 controles.maxPolarAngle = Math.PI * 0.49;
-// La rueda del mouse por default hace un zoom MULTIPLICATIVO muy agresivo
-// (con mouses/trackpads de alta resolucion, un solo "click" de rueda manda
-// varios eventos wheel seguidos, así que el default zoomSpeed=1 se sentía
-// como saltar de un extremo al otro con un solo movimiento). Bajarlo
-// suaviza el zoom sin perder rango.
-controles.zoomSpeed = 0.35;
+// El pellizco (pinch) en celu anda bien porque usa un camino de eventos
+// touch distinto -- lo dejamos intacto (enableZoom sigue en true, que es
+// lo que tambien habilita el pinch). El problema es solo la RUEDA del
+// mouse: bajar zoomSpeed no alcanzo porque algunos mouses/trackpads con
+// scroll de alta resolucion mandan decenas de eventos "wheel" por cada
+// click fisico de la rueda, y esos eventos se siguen multiplicando entre
+// si aunque cada uno pese poco. La solucion que realmente lo arregla:
+// interceptar el evento wheel ANTES de que le llegue a OrbitControls y
+// hacer nuestro propio zoom con un paso fijo por evento Y un limite de
+// "un paso cada tantos milisegundos" -- asi no importa cuantos eventos
+// mande el mouse por notch, el resultado visual es siempre un paso chico
+// y prolijo. OJO: OrbitControls registra su propio listener de wheel
+// directamente sobre renderer.domElement, asi que agregar OTRO listener
+// (aunque sea con capture:true) en el MISMO elemento no garantiza orden
+// -- en el target, el orden es el de registro, no el de capture/bubble.
+// Por eso interceptamos un nivel mas arriba, en window, en fase de
+// captura: ahi SI la captura corre antes de llegar al canvas, sin
+// ambiguedad, y con stopPropagation el evento nunca llega a OrbitControls.
+controles.enableZoom = true;
+
+// Zoom manual (dolly): acerca/aleja la camara a lo largo de la linea
+// camara-target, respetando min/maxDistance. La usan tanto el handler de
+// rueda de mas abajo como los botones +/- en pantalla.
+function aplicarZoom(factor) {
+  const offset = new THREE.Vector3().subVectors(camara.position, controles.target);
+  const distancia = THREE.MathUtils.clamp(offset.length() * factor, controles.minDistance, controles.maxDistance);
+  offset.setLength(distancia);
+  camara.position.copy(controles.target).add(offset);
+}
+
+// Interceptamos la rueda en WINDOW, en fase de captura -- eso corre antes
+// de que el evento baje hasta el canvas, así que con stopPropagation()
+// OrbitControls nunca llega a ver el evento (su zoom nativo, el que se
+// sentia descontrolado, no se ejecuta). El touch/pinch no pasa por
+// 'wheel', asi que esto no afecta nada en el celu.
+const PASO_ZOOM_RUEDA = 1.06;
+const THROTTLE_RUEDA_MS = 55; // un solo paso por cada "rafaga" de eventos wheel
+let ultimaRuedaTs = 0;
+
+window.addEventListener(
+  "wheel",
+  (ev) => {
+    if (!renderer.domElement.contains(ev.target) && ev.target !== renderer.domElement) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const ahora = performance.now();
+    if (ahora - ultimaRuedaTs < THROTTLE_RUEDA_MS) return;
+    ultimaRuedaTs = ahora;
+    aplicarZoom(ev.deltaY > 0 ? PASO_ZOOM_RUEDA : 1 / PASO_ZOOM_RUEDA);
+  },
+  { capture: true, passive: false }
+);
+
+// Botones +/- en pantalla: alternativa al mouse/touch para acercar o
+// alejar. Un click hace un paso; mantenerlo apretado repite el paso cada
+// pocos ms (funciona igual con mouse y con touch en celu).
+function conectarBotonZoom(idBoton, factorPorPaso) {
+  const boton = document.getElementById(idBoton);
+  let intervalo = null;
+  const disparar = () => aplicarZoom(factorPorPaso);
+  const empezar = (ev) => {
+    ev.preventDefault();
+    disparar();
+    intervalo = setInterval(disparar, 90);
+  };
+  const parar = () => { if (intervalo) { clearInterval(intervalo); intervalo = null; } };
+  boton.addEventListener("mousedown", empezar);
+  boton.addEventListener("touchstart", empezar, { passive: false });
+  ["mouseup", "mouseleave", "touchend", "touchcancel"].forEach((evt) => boton.addEventListener(evt, parar));
+}
+conectarBotonZoom("zoom-mas", 1 / 1.12);
+conectarBotonZoom("zoom-menos", 1.12);
 
 escena.add(new THREE.AmbientLight(0xffffff, 0.6));
 const luzDir = new THREE.DirectionalLight(0xffffff, 0.4);
@@ -218,7 +303,14 @@ const _colorTmp = new THREE.Color();
 
 function crearFila(niveles) {
   const cantidad = niveles.length;
-  const instanced = new THREE.InstancedMesh(geomBase, matBase.clone(), cantidad);
+  // OJO: NO clonar el material -- el color de cada bucket sale del
+  // atributo instanceColor (por-instancia), no de material.color, asi
+  // que las 200 filas del historial pueden compartir el MISMO material
+  // sin problema. Clonarlo (como se hacia antes) creaba un Material
+  // nuevo en CADA tick para siempre, generando basura constante para el
+  // garbage collector -- con el rango de precio ampliado (mas buckets
+  // por fila) eso alcanzaba a trabar el render en sesiones largas.
+  const instanced = new THREE.InstancedMesh(geomBase, matBase, cantidad);
   instanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cantidad * 3), 3);
 
   niveles.forEach((nivel, i) => {
@@ -264,8 +356,12 @@ function agregarTickAlHistorial(niveles) {
   if (filas.length > MAX_FILAS_HISTORIAL) {
     const vieja = filas.shift();
     grupoFilas.remove(vieja);
-    vieja.geometry === geomBase || vieja.geometry.dispose?.();
-    vieja.material.dispose?.();
+    // geometry y material son COMPARTIDOS (geomBase / matBase) entre las
+    // 200 filas -- si se hiciera dispose() aca se romperian las otras 199
+    // filas que siguen vivas usando el mismo objeto. Lo unico propio de
+    // cada fila es su buffer de instancias (matrices + colores), que sí
+    // hay que liberar.
+    vieja.dispose?.(); // libera los buffers de instancia (matrix/color) de ESTA fila
   }
 }
 
@@ -320,12 +416,17 @@ for (let i = 0; i < CANT_ETIQUETAS_DOM; i++) {
 function actualizarDOM(niveles) {
   if (domInstanced) {
     grupoDOM.remove(domInstanced);
-    domInstanced.geometry === geomBase || domInstanced.geometry.dispose?.();
-    domInstanced.material.dispose?.();
+    // mismo motivo que en crearFila: geometria y material son compartidos
+    // (geomBase / matDOM), asi que NO se disponen aca -- solo se liberan
+    // los buffers de instancia propios de este mesh puntual.
+    domInstanced.dispose?.();
   }
 
   const cantidad = niveles.length;
-  const instanced = new THREE.InstancedMesh(geomBase, matDOM.clone(), cantidad);
+  // matDOM sin clonar: el color sale de instanceColor, no hace falta un
+  // material distinto en cada tick (antes se creaba y se tiraba uno nuevo
+  // cada 150ms para siempre, generando basura constante).
+  const instanced = new THREE.InstancedMesh(geomBase, matDOM, cantidad);
   instanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cantidad * 3), 3);
   const alturas = new Array(cantidad); // se reusa para posicionar las etiquetas exactamente sobre cada barra
 
