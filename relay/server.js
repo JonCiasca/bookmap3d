@@ -1,0 +1,262 @@
+// server.js
+//
+// Proceso "puente" entre Binance y el navegador. Corre local (npm start) o
+// desplegado (Render, ver README) y hace TRES cosas:
+//
+//   1) Se conecta a Binance por websocket (streams @depth y @aggTrade) y
+//      mantiene el order book en memoria con orderbook.js, siguiendo el
+//      metodo oficial de sincronizacion (snapshot REST + eventos delta).
+//      Si detecta un gap en la secuencia (evento perdido), se re-sincroniza
+//      solo pidiendo un snapshot nuevo -- antes esto no se detectaba y el
+//      book quedaba desincronizado silenciosamente.
+//
+//   2) Levanta un servidor HTTP que sirve `frontend/` como sitio estatico
+//      Y ademas un websocket (mismo puerto) al que se conecta el frontend.
+//      Antes eran dos piezas separadas (abrir index.html a mano); ahora
+//      un solo proceso sirve todo, que es lo que necesita Render/Railway/etc.
+//
+//   3) Cada INTERVALO_ENVIO_MS manda al frontend un snapshot agregado del
+//      book (paredes bid/ask por separado) + los trades que fueron llegando
+//      + el delta de volumen agresor (compra vs venta) de esa ventana.
+//
+// Config por variables de entorno (todas opcionales, ver .env.example):
+//   SYMBOL, BUCKET_SIZE, RANGO_BUCKETS, INTERVALO_ENVIO_MS, PORT, MODO_DEMO
+
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import WebSocket, { WebSocketServer } from "ws";
+import { OrderBook } from "./orderbook.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIR_FRONTEND = path.join(__dirname, "..", "frontend");
+
+const SYMBOL = (process.env.SYMBOL || "btcusdt").toLowerCase();
+const BUCKET_SIZE = Number(process.env.BUCKET_SIZE || 5); // USD por pared
+const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 60); // paredes por lado
+const INTERVALO_ENVIO_MS = Number(process.env.INTERVALO_ENVIO_MS || 250);
+const PUERTO = Number(process.env.PORT || 8081);
+const MODO_DEMO = process.env.MODO_DEMO === "1"; // datos sinteticos, sin Binance (para probar sin red)
+
+const book = new OrderBook();
+let bufferEventos = [];
+let esperandoSnapshot = false;
+let tradesRecientes = [];
+let deltaAgresorVentana = 0; // + compra agresiva, - venta agresiva (USD notional)
+let wsBinance = null;
+let ultimoEstadoBinance = "desconectado";
+
+// -----------------------------------------------------
+// 1) Conexion a Binance (con resync automatico ante gaps)
+// -----------------------------------------------------
+async function pedirSnapshotYAplicar() {
+  esperandoSnapshot = true;
+  book.reset();
+  bufferEventos = [];
+  try {
+    const resp = await fetch(
+      `https://api.binance.com/api/v3/depth?symbol=${SYMBOL.toUpperCase()}&limit=1000`
+    );
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const snapshot = await resp.json();
+    book.aplicarSnapshotRest(snapshot);
+
+    // aplicar lo bufferizado mientras esperabamos el snapshot, en orden
+    for (const evento of bufferEventos) {
+      const resultado = book.aplicarEventoDepth(evento);
+      if (resultado === "gap") {
+        console.warn("[binance] gap durante replay del buffer, reintentando snapshot...");
+        esperandoSnapshot = false;
+        return pedirSnapshotYAplicar();
+      }
+    }
+    bufferEventos = [];
+    esperandoSnapshot = false;
+    console.log("[binance] snapshot aplicado, lastUpdateId:", book.lastUpdateId);
+  } catch (err) {
+    console.error("[binance] error pidiendo snapshot REST:", err.message, "-- reintento en 2s");
+    esperandoSnapshot = false;
+    setTimeout(pedirSnapshotYAplicar, 2000);
+  }
+}
+
+function conectarBinance() {
+  const streams = `${SYMBOL}@depth@100ms/${SYMBOL}@aggTrade`;
+  wsBinance = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+
+  wsBinance.on("open", () => {
+    console.log("[binance] conectado, streams:", streams);
+    ultimoEstadoBinance = "conectado";
+    pedirSnapshotYAplicar();
+  });
+
+  wsBinance.on("message", (raw) => {
+    const msg = JSON.parse(raw.toString());
+    const stream = msg.stream;
+    const data = msg.data;
+
+    if (stream.endsWith("@depth@100ms")) {
+      if (esperandoSnapshot || !book.ready) {
+        bufferEventos.push(data);
+        return;
+      }
+      const resultado = book.aplicarEventoDepth(data);
+      if (resultado === "gap") {
+        console.warn("[binance] gap detectado en la secuencia, re-sincronizando...");
+        pedirSnapshotYAplicar();
+      }
+    } else if (stream.endsWith("@aggTrade")) {
+      const precio = parseFloat(data.p);
+      const qty = parseFloat(data.q);
+      tradesRecientes.push({
+        precio,
+        qty,
+        esVentaAgresiva: data.m, // true = taker vendio (venta agresiva)
+        tiempo: data.T,
+      });
+      deltaAgresorVentana += data.m ? -(precio * qty) : precio * qty;
+    }
+  });
+
+  wsBinance.on("close", () => {
+    ultimoEstadoBinance = "desconectado";
+    console.log("[binance] desconectado, reintentando en 3s...");
+    setTimeout(conectarBinance, 3000);
+  });
+
+  wsBinance.on("error", (err) => {
+    console.error("[binance] error de conexion:", err.message);
+  });
+}
+
+// -----------------------------------------------------
+// Modo demo: genera un book + trades sinteticos con random walk,
+// para poder probar el frontend sin salir a internet / sin depender
+// de que Binance este accesible.
+// -----------------------------------------------------
+function arrancarModoDemo() {
+  console.log("[demo] MODO_DEMO=1 -- generando datos sinteticos, no se usa Binance");
+  let mid = 65000;
+  const bidsDemo = new Map();
+  const asksDemo = new Map();
+
+  function regenerarNiveles() {
+    bidsDemo.clear();
+    asksDemo.clear();
+    for (let i = 1; i <= 400; i++) {
+      const p = Math.round((mid - i * 1.25) * 100) / 100;
+      bidsDemo.set(p, Math.random() * 2 + (i % 20 === 0 ? 8 : 0));
+      const a = Math.round((mid + i * 1.25) * 100) / 100;
+      asksDemo.set(a, Math.random() * 2 + (i % 17 === 0 ? 8 : 0));
+    }
+  }
+  regenerarNiveles();
+
+  book.ready = true;
+  book.bids = bidsDemo;
+  book.asks = asksDemo;
+
+  setInterval(() => {
+    mid += (Math.random() - 0.5) * 8;
+    regenerarNiveles();
+    book.bids = bidsDemo;
+    book.asks = asksDemo;
+
+    if (Math.random() < 0.7) {
+      const esVenta = Math.random() < 0.5;
+      const precio = mid + (Math.random() - 0.5) * 4;
+      const qty = Math.random() * 0.5 + 0.01;
+      tradesRecientes.push({ precio, qty, esVentaAgresiva: esVenta, tiempo: Date.now() });
+      deltaAgresorVentana += esVenta ? -(precio * qty) : precio * qty;
+    }
+  }, 150);
+
+  ultimoEstadoBinance = "demo";
+}
+
+if (MODO_DEMO) arrancarModoDemo();
+else conectarBinance();
+
+// -----------------------------------------------------
+// 2) Servidor HTTP (sirve frontend/ + upgrade a websocket)
+// -----------------------------------------------------
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+};
+
+const httpServer = http.createServer((req, res) => {
+  if (req.url === "/salud") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, binance: ultimoEstadoBinance, bookListo: book.ready }));
+    return;
+  }
+
+  let urlPath = req.url === "/" ? "/index.html" : req.url;
+  urlPath = urlPath.split("?")[0];
+  const rutaArchivo = path.normalize(path.join(DIR_FRONTEND, urlPath));
+
+  // evitar path traversal fuera de frontend/
+  if (!rutaArchivo.startsWith(DIR_FRONTEND)) {
+    res.writeHead(403);
+    res.end("prohibido");
+    return;
+  }
+
+  fs.readFile(rutaArchivo, (err, contenido) => {
+    if (err) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("no encontrado");
+      return;
+    }
+    const ext = path.extname(rutaArchivo);
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    res.end(contenido);
+  });
+});
+
+const wss = new WebSocketServer({ server: httpServer });
+
+wss.on("connection", (cliente) => {
+  console.log("[local] frontend conectado");
+  // le mandamos la config para que no tenga que hardcodearla
+  cliente.send(JSON.stringify({
+    tipo: "config",
+    symbol: SYMBOL.toUpperCase(),
+    bucketSize: BUCKET_SIZE,
+    intervaloMs: INTERVALO_ENVIO_MS,
+  }));
+});
+
+setInterval(() => {
+  if (!book.ready) return;
+
+  const { mid, mejorBid, mejorAsk, niveles } = book.agregarPorBuckets(BUCKET_SIZE, RANGO_BUCKETS);
+  if (mid === null) return;
+
+  const payload = JSON.stringify({
+    tipo: "tick",
+    tiempo: Date.now(),
+    mid,
+    mejorBid,
+    mejorAsk,
+    niveles,
+    trades: tradesRecientes,
+    deltaAgresor: deltaAgresorVentana,
+    binance: ultimoEstadoBinance,
+  });
+
+  tradesRecientes = [];
+  deltaAgresorVentana = 0;
+
+  for (const cliente of wss.clients) {
+    if (cliente.readyState === WebSocket.OPEN) cliente.send(payload);
+  }
+}, INTERVALO_ENVIO_MS);
+
+httpServer.listen(PUERTO, () => {
+  console.log(`[local] sirviendo frontend + websocket en http://localhost:${PUERTO}`);
+});

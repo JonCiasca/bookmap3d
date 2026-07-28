@@ -1,0 +1,16 @@
+{
+  "name": "bookmap3d-relay",
+  "version": "0.2.0",
+  "description": "Relay Node: conecta a Binance por websocket, mantiene el order book y sirve el frontend 3D.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "demo": "MODO_DEMO=1 node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

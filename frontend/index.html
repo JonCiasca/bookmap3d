@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>Bookmap 3D</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #05070a; }
+  #info {
+    position: fixed; top: 12px; left: 12px; z-index: 10;
+    font-family: -apple-system, system-ui, sans-serif; color: #cfe8ff;
+    background: rgba(10, 15, 25, 0.7); padding: 10px 14px; border-radius: 8px;
+    font-size: 13px; line-height: 1.5; pointer-events: none;
+  }
+  #info b { color: #ffe27a; font-size: 16px; }
+  #delta { font-weight: bold; }
+  #delta.compra { color: #7fe0a8; }
+  #delta.venta { color: #ff8a9a; }
+  #estado { position: fixed; top: 12px; right: 12px; z-index: 10;
+    font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
+    padding: 6px 12px; border-radius: 6px; color: #fff; }
+  .ok { background: #1f8a4c; } .caido { background: #a4302a; } .demo { background: #8a6d1f; }
+  .etiqueta {
+    font-family: -apple-system, system-ui, sans-serif; font-size: 11px;
+    color: #cfe8ff; background: rgba(15, 25, 35, 0.55); padding: 2px 6px;
+    border-radius: 4px; white-space: nowrap; pointer-events: none;
+  }
+  .etiqueta.tiempo { color: #9fb8cc; background: rgba(15, 25, 35, 0.4); }
+</style>
+</head>
+<body>
+<div id="info">
+  <b id="precio">--</b><br/>
+  <span id="simbolo">--</span> — profundidad agregada en vivo<br/>
+  delta agresor (10s): <span id="delta">--</span><br/>
+  <span id="hora-ar">--:--:--</span> (Argentina)
+</div>
+<div id="estado" class="caido">conectando...</div>
+<div id="tooltip" style="
+  position: fixed; z-index: 20; display: none; pointer-events: none;
+  font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
+  background: rgba(10, 15, 25, 0.92); color: #eaf6ff; padding: 8px 12px;
+  border-radius: 8px; border: 1px solid rgba(255,255,255,0.12);">
+  <div id="tooltip-precio" style="font-weight:bold; font-size:14px; color:#ffe27a;"></div>
+  <div id="tooltip-qty"></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+
+// -----------------------------------------------------
+// Config
+// -----------------------------------------------------
+// URL del websocket: si esto se sirve desde el mismo relay (Render o local
+// via http://localhost:8081), usamos el mismo host/puerto automaticamente.
+// Si se abre el archivo directo (file://) o se sirve desde otro origen
+// (ej. GitHub Pages), cae a localhost:8081 para desarrollo.
+const WS_URL = (() => {
+  if (location.protocol === "http:" || location.protocol === "https:") {
+    const esquema = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${esquema}//${location.host}`;
+  }
+  return "ws://localhost:8081";
+})();
+
+let MAX_FILAS_HISTORIAL = 200;   // se puede ajustar via config del server
+let INTERVALO_S = 0.25;          // debe matchear intervaloMs del server (en segundos)
+const ESPACIO_ENTRE_FILAS = 0.5;
+const ANCHO_TOTAL_DESEADO = 34;
+const ALTURA_MAX_PARED = 6;
+const ALTURA_MIN_PARED = 0.12;
+
+// Escala de color tipo Bookmap: NO relativa al maximo de cada tick (eso hace
+// que la escala "respire" y sea imposible comparar una pared con la de hace
+// 20s). Usamos una escala LOGARITMICA con un techo que se adapta lento
+// (percentil aproximado, actualizado con inercia), asi los colores son
+// comparables entre ticks y entre filas del historial.
+let techoColorBid = 1;
+let techoColorAsk = 1;
+const INERCIA_TECHO = 0.02; // que tan rapido se adapta el techo (mas bajo = mas estable)
+
+function actualizarTechos(niveles) {
+  let maxBid = 1e-6, maxAsk = 1e-6;
+  for (const n of niveles) {
+    if (n.bid > maxBid) maxBid = n.bid;
+    if (n.ask > maxAsk) maxAsk = n.ask;
+  }
+  // el techo sube rapido si aparece un pico grande, pero baja lento
+  // (asi una pared gigante que ya se fue no se olvida de golpe)
+  techoColorBid = maxBid > techoColorBid ? maxBid : techoColorBid * (1 - INERCIA_TECHO) + maxBid * INERCIA_TECHO;
+  techoColorAsk = maxAsk > techoColorAsk ? maxAsk : techoColorAsk * (1 - INERCIA_TECHO) + maxAsk * INERCIA_TECHO;
+}
+
+function colorPorVolumen(qty, techo, esBid) {
+  const t = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
+  const color = new THREE.Color();
+  // bid: azul->verde brillante. ask: azul->rojo/naranja brillante.
+  // asi de un vistazo se distingue lado (matiz base) e intensidad (brillo).
+  const hueBase = esBid ? 0.38 : 0.02;
+  const hueBajo = 0.58;
+  const hue = hueBajo + (hueBase - hueBajo) * t;
+  color.setHSL(hue, 0.7, 0.28 + t * 0.32);
+  return color;
+}
+
+let ESCALA_X = null;
+let ultimoNiveles = null;
+
+// -----------------------------------------------------
+// Escena
+// -----------------------------------------------------
+const escena = new THREE.Scene();
+escena.background = new THREE.Color(0x05070a);
+escena.fog = new THREE.Fog(0x05070a, 25, 110);
+
+const camara = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+camara.position.set(0, 26, 36);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(window.innerWidth, window.innerHeight);
+labelRenderer.domElement.style.position = "absolute";
+labelRenderer.domElement.style.top = "0px";
+labelRenderer.domElement.style.pointerEvents = "none";
+document.body.appendChild(labelRenderer.domElement);
+
+const controles = new OrbitControls(camara, renderer.domElement);
+controles.target.set(0, 0, -20);
+controles.enableDamping = true;
+controles.minDistance = 8;
+controles.maxDistance = 130;
+controles.maxPolarAngle = Math.PI * 0.49;
+
+escena.add(new THREE.AmbientLight(0xffffff, 0.6));
+const luzDir = new THREE.DirectionalLight(0xffffff, 0.4);
+luzDir.position.set(5, 20, 10);
+escena.add(luzDir);
+
+const grid = new THREE.GridHelper(140, 40, 0x1a2b3c, 0x1a2b3c);
+grid.position.set(0, -3, -40);
+escena.add(grid);
+
+function crearEtiqueta(texto, clase) {
+  const div = document.createElement("div");
+  div.className = "etiqueta " + (clase || "");
+  div.textContent = texto;
+  return new CSS2DObject(div);
+}
+
+const grupoEjeTiempo = new THREE.Group();
+escena.add(grupoEjeTiempo);
+function reconstruirEjeTiempo() {
+  grupoEjeTiempo.clear();
+  const totalSeg = Math.round(MAX_FILAS_HISTORIAL * INTERVALO_S);
+  const pasos = 5;
+  for (let i = 1; i <= pasos; i++) {
+    const seg = Math.round((totalSeg / pasos) * i);
+    const z = -(seg / INTERVALO_S) * ESPACIO_ENTRE_FILAS;
+    const et = crearEtiqueta(`-${seg}s`, "tiempo");
+    et.position.set(-ANCHO_TOTAL_DESEADO / 2 - 2, -2.7, z);
+    grupoEjeTiempo.add(et);
+  }
+  const etAhora = crearEtiqueta("ahora", "tiempo");
+  etAhora.position.set(-ANCHO_TOTAL_DESEADO / 2 - 2, -2.7, 0);
+  grupoEjeTiempo.add(etAhora);
+}
+reconstruirEjeTiempo();
+
+// -----------------------------------------------------
+// Filas de historial, con InstancedMesh (una sola geometria/material por
+// fila, tantas instancias como buckets). Antes se creaba un Mesh + Material
+// por bucket por tick -- con 121 buckets * 200 filas de historial eso son
+// decenas de miles de objetos y materiales vivos, muy pesado para el GC y
+// el renderer. InstancedMesh dibuja todo en una sola draw call por fila.
+// -----------------------------------------------------
+const filas = []; // cada item: { instanced, niveles }
+const grupoFilas = new THREE.Group();
+escena.add(grupoFilas);
+
+const geomBase = new THREE.BoxGeometry(1, 1, ESPACIO_ENTRE_FILAS * 0.85);
+const matBase = new THREE.MeshStandardMaterial({ roughness: 0.6, transparent: true, opacity: 0.9 });
+
+const _matrizTmp = new THREE.Matrix4();
+const _colorTmp = new THREE.Color();
+
+function crearFila(niveles) {
+  const cantidad = niveles.length;
+  const instanced = new THREE.InstancedMesh(geomBase, matBase.clone(), cantidad);
+  instanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cantidad * 3), 3);
+
+  niveles.forEach((nivel, i) => {
+    const qty = nivel.bid + nivel.ask;
+    const techo = nivel.bid >= nivel.ask ? techoColorBid : techoColorAsk;
+    const proporcion = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
+    const altura = ALTURA_MIN_PARED + proporcion * (ALTURA_MAX_PARED - ALTURA_MIN_PARED);
+
+    _matrizTmp.makeScale(ESCALA_X * 0.95, altura, 1);
+    _matrizTmp.setPosition(
+      (i - (niveles.length - 1) / 2) * ESCALA_X,
+      altura / 2 - 3,
+      0
+    );
+    instanced.setMatrixAt(i, _matrizTmp);
+
+    const esBid = nivel.bid >= nivel.ask;
+    _colorTmp.copy(colorPorVolumen(qty, esBid ? techoColorBid : techoColorAsk, esBid));
+    instanced.setColorAt(i, _colorTmp);
+  });
+  instanced.instanceMatrix.needsUpdate = true;
+  if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
+
+  return instanced;
+}
+
+function agregarTickAlHistorial(niveles) {
+  if (ESCALA_X === null) {
+    ESCALA_X = ANCHO_TOTAL_DESEADO / niveles.length;
+  }
+
+  actualizarTechos(niveles);
+  ultimoNiveles = niveles;
+
+  const instanced = crearFila(niveles);
+  instanced.position.z = 0;
+  instanced.userData = { niveles };
+  grupoFilas.add(instanced);
+  filas.push(instanced);
+
+  for (const f of filas) f.position.z -= ESPACIO_ENTRE_FILAS;
+
+  if (filas.length > MAX_FILAS_HISTORIAL) {
+    const vieja = filas.shift();
+    grupoFilas.remove(vieja);
+    vieja.geometry === geomBase || vieja.geometry.dispose?.();
+    vieja.material.dispose?.();
+  }
+}
+
+function alturaEscenaDeNivel(nivel) {
+  if (!nivel) return 0;
+  const qty = nivel.bid + nivel.ask;
+  const esBid = nivel.bid >= nivel.ask;
+  const techo = esBid ? techoColorBid : techoColorAsk;
+  const proporcion = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
+  return ALTURA_MIN_PARED + proporcion * (ALTURA_MAX_PARED - ALTURA_MIN_PARED);
+}
+
+// -----------------------------------------------------
+// Etiquetas de precio
+// -----------------------------------------------------
+const CANT_ETIQUETAS_PRECIO = 7;
+const etiquetasPrecio = [];
+const grupoEtiquetasPrecio = new THREE.Group();
+escena.add(grupoEtiquetasPrecio);
+for (let i = 0; i < CANT_ETIQUETAS_PRECIO; i++) {
+  const et = crearEtiqueta("--", "precio");
+  grupoEtiquetasPrecio.add(et);
+  etiquetasPrecio.push(et);
+}
+
+function actualizarEtiquetasPrecio(niveles) {
+  const paso = Math.max(1, Math.floor(niveles.length / (CANT_ETIQUETAS_PRECIO - 1)));
+  for (let i = 0; i < CANT_ETIQUETAS_PRECIO; i++) {
+    const idx = Math.min(niveles.length - 1, i * paso);
+    const nivel = niveles[idx];
+    const et = etiquetasPrecio[i];
+    et.element.textContent = nivel.precio.toLocaleString("en-US");
+    et.position.set(
+      (idx - (niveles.length - 1) / 2) * ESCALA_X,
+      0.5,
+      0.5
+    );
+  }
+}
+
+// -----------------------------------------------------
+// Burbujas de trades
+// -----------------------------------------------------
+const burbujas = [];
+const grupoBurbujas = new THREE.Group();
+escena.add(grupoBurbujas);
+let lineaTrades = null;
+
+function agregarTrade(trade, precioReferencia, bucketSize) {
+  const radio = Math.min(1.6, 0.22 + Math.sqrt(trade.qty) * 0.65);
+  const geom = new THREE.SphereGeometry(radio, 18, 18);
+  const color = trade.esVentaAgresiva ? 0xff5c7a : 0xbfe6ff;
+  const mat = new THREE.MeshStandardMaterial({
+    color, emissive: color, emissiveIntensity: 0.55, transparent: true, opacity: 0.95,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+
+  const offsetX = ESCALA_X ? ((trade.precio - precioReferencia) / bucketSize) * ESCALA_X : 0;
+
+  let alturaBase = 0;
+  if (ultimoNiveles) {
+    let mejor = null;
+    let mejorDist = Infinity;
+    for (const nivel of ultimoNiveles) {
+      const dist = Math.abs(nivel.precio - trade.precio);
+      if (dist < mejorDist) { mejorDist = dist; mejor = nivel; }
+    }
+    if (mejor) alturaBase = alturaEscenaDeNivel(mejor) - 3;
+  }
+
+  mesh.position.set(offsetX, alturaBase + radio + 0.35, 0.4);
+
+  grupoBurbujas.add(mesh);
+  burbujas.push({ mesh, vida: 0 });
+}
+
+function actualizarBurbujas(dt) {
+  const velocidadZ = ESPACIO_ENTRE_FILAS / INTERVALO_S;
+  for (let i = burbujas.length - 1; i >= 0; i--) {
+    const b = burbujas[i];
+    b.vida += dt;
+    b.mesh.position.z -= dt * velocidadZ;
+    b.mesh.material.opacity = Math.max(0, 0.95 - b.vida / 14);
+    if (b.mesh.position.z < -ESPACIO_ENTRE_FILAS * MAX_FILAS_HISTORIAL) {
+      grupoBurbujas.remove(b.mesh);
+      b.mesh.geometry.dispose();
+      b.mesh.material.dispose();
+      burbujas.splice(i, 1);
+    }
+  }
+
+  if (lineaTrades) {
+    escena.remove(lineaTrades);
+    lineaTrades.geometry.dispose();
+    lineaTrades.material.dispose();
+    lineaTrades = null;
+  }
+  if (burbujas.length > 1) {
+    const puntos = burbujas.slice(-50).map((b) => b.mesh.position.clone());
+    const geom = new THREE.BufferGeometry().setFromPoints(puntos);
+    const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 });
+    lineaTrades = new THREE.Line(geom, mat);
+    escena.add(lineaTrades);
+  }
+}
+
+// -----------------------------------------------------
+// Conexion al relay
+// -----------------------------------------------------
+const elEstado = document.getElementById("estado");
+const elPrecio = document.getElementById("precio");
+const elSimbolo = document.getElementById("simbolo");
+const elDelta = document.getElementById("delta");
+let precioActual = null;
+let acumDelta = 0;
+let ultimoResetDelta = performance.now();
+
+function conectar() {
+  const ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    elEstado.textContent = "en vivo";
+    elEstado.className = "ok";
+  };
+  ws.onclose = () => {
+    elEstado.textContent = "reconectando...";
+    elEstado.className = "caido";
+    setTimeout(conectar, 2000);
+  };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (ev) => {
+    const data = JSON.parse(ev.data);
+
+    if (data.tipo === "config") {
+      if (data.symbol) elSimbolo.textContent = data.symbol;
+      if (data.intervaloMs) INTERVALO_S = data.intervaloMs / 1000;
+      reconstruirEjeTiempo();
+      return;
+    }
+    if (data.tipo !== "tick") return;
+
+    if (data.binance === "demo") {
+      elEstado.textContent = "demo (sin Binance)";
+      elEstado.className = "demo";
+    } else if (elEstado.className !== "ok") {
+      elEstado.textContent = "en vivo";
+      elEstado.className = "ok";
+    }
+
+    precioActual = data.mid;
+    elPrecio.textContent = precioActual.toFixed(1);
+
+    agregarTickAlHistorial(data.niveles);
+    actualizarEtiquetasPrecio(data.niveles);
+
+    acumDelta += data.deltaAgresor || 0;
+    const ahora = performance.now();
+    if (ahora - ultimoResetDelta > 10000) {
+      acumDelta = data.deltaAgresor || 0;
+      ultimoResetDelta = ahora;
+    }
+    elDelta.textContent = (acumDelta >= 0 ? "+" : "") + Math.round(acumDelta).toLocaleString("en-US") + " USD";
+    elDelta.className = acumDelta >= 0 ? "compra" : "venta";
+
+    const bucketSize = data.niveles.length > 1
+      ? Math.abs(data.niveles[1].precio - data.niveles[0].precio)
+      : 5;
+    for (const trade of data.trades) {
+      agregarTrade(trade, precioActual, bucketSize);
+    }
+  };
+}
+conectar();
+
+// -----------------------------------------------------
+// Reloj de Argentina
+// -----------------------------------------------------
+const elHoraAR = document.getElementById("hora-ar");
+function actualizarRelojAR() {
+  elHoraAR.textContent = new Date().toLocaleTimeString("es-AR", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    hour12: false,
+  });
+}
+actualizarRelojAR();
+setInterval(actualizarRelojAR, 1000);
+
+// -----------------------------------------------------
+// Tooltip (compatible con InstancedMesh via instanceId)
+// -----------------------------------------------------
+const tooltip = document.getElementById("tooltip");
+const tooltipPrecio = document.getElementById("tooltip-precio");
+const tooltipQty = document.getElementById("tooltip-qty");
+const raycaster = new THREE.Raycaster();
+const mouseNDC = new THREE.Vector2();
+let mousePantalla = { x: 0, y: 0 };
+let hoverActivo = false;
+
+renderer.domElement.addEventListener("mousemove", (ev) => {
+  mousePantalla.x = ev.clientX;
+  mousePantalla.y = ev.clientY;
+  mouseNDC.x = (ev.clientX / window.innerWidth) * 2 - 1;
+  mouseNDC.y = -(ev.clientY / window.innerHeight) * 2 + 1;
+  hoverActivo = true;
+});
+renderer.domElement.addEventListener("mouseleave", () => {
+  hoverActivo = false;
+  tooltip.style.display = "none";
+});
+
+function actualizarTooltip() {
+  if (!hoverActivo) return;
+  raycaster.setFromCamera(mouseNDC, camara);
+  const intersecciones = raycaster.intersectObjects(grupoFilas.children, false);
+  if (intersecciones.length > 0) {
+    const hit = intersecciones[0];
+    const niveles = hit.object.userData.niveles;
+    const nivel = niveles?.[hit.instanceId];
+    if (nivel) {
+      tooltip.style.display = "block";
+      tooltip.style.left = mousePantalla.x + 14 + "px";
+      tooltip.style.top = mousePantalla.y + 14 + "px";
+      tooltipPrecio.textContent = "$" + nivel.precio.toLocaleString("en-US");
+      tooltipQty.textContent = `bid: ${nivel.bid.toFixed(3)} | ask: ${nivel.ask.toFixed(3)} BTC`;
+      return;
+    }
+  }
+  tooltip.style.display = "none";
+}
+
+// -----------------------------------------------------
+// Loop de render
+// -----------------------------------------------------
+let ultimoTiempo = performance.now();
+function animar() {
+  requestAnimationFrame(animar);
+  const ahora = performance.now();
+  const dt = (ahora - ultimoTiempo) / 1000;
+  ultimoTiempo = ahora;
+
+  actualizarBurbujas(dt);
+  actualizarTooltip();
+  controles.update();
+  renderer.render(escena, camara);
+  labelRenderer.render(escena, camara);
+}
+animar();
+
+window.addEventListener("resize", () => {
+  camara.aspect = window.innerWidth / window.innerHeight;
+  camara.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

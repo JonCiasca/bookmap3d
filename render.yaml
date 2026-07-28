@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: bookmap3d
+    runtime: node
+    plan: free
+    rootDir: relay
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SYMBOL
+        value: btcusdt
+      - key: BUCKET_SIZE
+        value: "5"
+      - key: RANGO_BUCKETS
+        value: "60"
+      - key: INTERVALO_ENVIO_MS
+        value: "250"
+      - key: MODO_DEMO
+        value: "0"
+    healthCheckPath: /salud
