@@ -18,4 +18,6 @@ services:
         value: "250"
       - key: MODO_DEMO
         value: "0"
+      - key: GEX_INTERVALO_MS
+        value: "60000"
     healthCheckPath: /salud

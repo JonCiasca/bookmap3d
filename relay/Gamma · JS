@@ -1,0 +1,123 @@
+// gamma.js
+//
+// Estima el Gamma Exposure (GEX) neto de las opciones de BTC en Deribit.
+//
+// OJO con lo que esto es y lo que no es: esto es un ESTIMADOR publico, no
+// la posicion real de las mesas de opciones (eso no lo publica nadie). Se
+// calcula a partir del open interest publico de cada instrumento y su
+// gamma de Black-Scholes (usando el mark IV que reporta Deribit), siguiendo
+// la convencion habitual de las herramientas de GEX (nacida para SPX, acá
+// portada a BTC/Deribit): se asume que las mesas quedan LARGAS gamma por
+// las calls que vendieron y CORTAS gamma por las puts que vendieron. Es
+// una heuristica basada en OI, no una verdad objetiva -- pero es la misma
+// que usan la mayoria de los trackers de GEX publicos que vas a encontrar.
+//
+// Formula por instrumento ("dollar gamma por cada 1% de movimiento del
+// subyacente", la normalizacion estandar tipo SqueezeMetrics):
+//
+//   GEX_i = gamma_i * openInterest_i * underlying_i^2 * 0.01
+//
+// Net GEX = suma en calls - suma en puts.
+//   Net GEX > 0 -> "gamma largo": las mesas tienden a comprar en las bajas
+//     y vender en las subas para cubrirse -> amortigua el movimiento.
+//   Net GEX < 0 -> "gamma corto": las mesas tienden a vender en las bajas
+//     y comprar en las subas -> amplifica el movimiento.
+
+const URL_BOOK_SUMMARY =
+  "https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option";
+
+const MESES = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+
+// instrument_name de Deribit: "BTC-27JUN25-60000-C" -> {expiryMs, strike, esCall}
+export function parsearInstrumento(nombre) {
+  const partes = nombre.split("-");
+  if (partes.length !== 4) return null;
+  const [, expiryStr, strikeStr, tipoStr] = partes;
+
+  // expiryStr = "27JUN25": dia (1-2 digitos) + mes (3 letras) + anio (2 digitos)
+  const m = expiryStr.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+  if (!m) return null;
+  const dia = parseInt(m[1], 10);
+  const mes = MESES[m[2]];
+  const anio = 2000 + parseInt(m[3], 10);
+  if (mes === undefined || Number.isNaN(dia)) return null;
+
+  const expiryMs = Date.UTC(anio, mes, dia, 8, 0, 0); // Deribit liquida 08:00 UTC
+  const strike = parseFloat(strikeStr);
+  if (!Number.isFinite(strike)) return null;
+  const esCall = tipoStr === "C";
+
+  return { expiryMs, strike, esCall };
+}
+
+function densidadNormal(x) {
+  return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+}
+
+// Gamma de Black-Scholes (misma formula para call y put). Se asume r=0:
+// razonable para opciones cripto de plazo corto, y Deribit ya cotiza
+// underlying_price como una especie de forward que embebe el carry.
+export function gammaBS(forward, strike, tAnios, sigma) {
+  if (tAnios <= 0 || sigma <= 0 || forward <= 0 || strike <= 0) return 0;
+  const d1 =
+    (Math.log(forward / strike) + 0.5 * sigma * sigma * tAnios) / (sigma * Math.sqrt(tAnios));
+  return densidadNormal(d1) / (forward * sigma * Math.sqrt(tAnios));
+}
+
+export async function obtenerGammaExposure() {
+  const resp = await fetch(URL_BOOK_SUMMARY);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  const instrumentos = data.result || [];
+
+  const ahoraMs = Date.now();
+  let gexCalls = 0;
+  let gexPuts = 0;
+  let oiCalls = 0;
+  let oiPuts = 0;
+  let contados = 0;
+
+  for (const inst of instrumentos) {
+    try {
+      const oi = inst.open_interest;
+      const ivPct = inst.mark_iv;
+      const forward = inst.underlying_price;
+      if (!oi || oi <= 0 || !ivPct || ivPct <= 0 || !forward || forward <= 0) continue;
+
+      const parsed = parsearInstrumento(inst.instrument_name);
+      if (!parsed) continue;
+
+      const tAnios = (parsed.expiryMs - ahoraMs) / (365 * 24 * 3600 * 1000);
+      if (tAnios <= 0) continue;
+
+      const sigma = ivPct / 100;
+      const gamma = gammaBS(forward, parsed.strike, tAnios, sigma);
+      if (!Number.isFinite(gamma) || gamma <= 0) continue;
+
+      const gex = gamma * oi * forward * forward * 0.01;
+      if (parsed.esCall) {
+        gexCalls += gex;
+        oiCalls += oi;
+      } else {
+        gexPuts += gex;
+        oiPuts += oi;
+      }
+      contados++;
+    } catch {
+      // un instrumento individual mal formado no debe tirar abajo todo el calculo
+    }
+  }
+
+  const netGEX = gexCalls - gexPuts;
+
+  return {
+    netGEX,
+    gexCalls,
+    gexPuts,
+    oiCalls,
+    oiPuts,
+    instrumentosUsados: contados,
+    regimen: netGEX >= 0 ? "largo" : "corto",
+    actualizado: ahoraMs,
+  };
+}

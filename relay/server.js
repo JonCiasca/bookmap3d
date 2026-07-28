@@ -19,8 +19,15 @@
 //      book (paredes bid/ask por separado) + los trades que fueron llegando
 //      + el delta de volumen agresor (compra vs venta) de esa ventana.
 //
+//   4) Cada GEX_INTERVALO_MS (por default 60s) pide a Deribit el open
+//      interest y la IV de las opciones de BTC, y calcula un estimador de
+//      Gamma Exposure (GEX) neto -- ver gamma.js para el detalle y las
+//      limitaciones de esto. Es independiente del book de Binance, así que
+//      si Deribit falla o tarda, el resto de la app sigue funcionando.
+//
 // Config por variables de entorno (todas opcionales, ver .env.example):
-//   SYMBOL, BUCKET_SIZE, RANGO_BUCKETS, INTERVALO_ENVIO_MS, PORT, MODO_DEMO
+//   SYMBOL, BUCKET_SIZE, RANGO_BUCKETS, INTERVALO_ENVIO_MS, PORT, MODO_DEMO,
+//   GEX_INTERVALO_MS
 
 import http from "node:http";
 import fs from "node:fs";
@@ -28,6 +35,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 import { OrderBook } from "./orderbook.js";
+import { obtenerGammaExposure } from "./gamma.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIR_FRONTEND = path.join(__dirname, "..", "frontend");
@@ -38,6 +46,7 @@ const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 60); // paredes por la
 const INTERVALO_ENVIO_MS = Number(process.env.INTERVALO_ENVIO_MS || 250);
 const PUERTO = Number(process.env.PORT || 8081);
 const MODO_DEMO = process.env.MODO_DEMO === "1"; // datos sinteticos, sin Binance (para probar sin red)
+const GEX_INTERVALO_MS = Number(process.env.GEX_INTERVALO_MS || 60_000);
 
 const book = new OrderBook();
 let bufferEventos = [];
@@ -179,6 +188,29 @@ if (MODO_DEMO) arrancarModoDemo();
 else conectarBinance();
 
 // -----------------------------------------------------
+// Gamma Exposure (Deribit, opciones de BTC) -- ver gamma.js
+// -----------------------------------------------------
+let ultimoGEX = null;
+
+async function actualizarGEX() {
+  try {
+    ultimoGEX = await obtenerGammaExposure();
+    console.log(
+      `[gex] actualizado: netGEX=${(ultimoGEX.netGEX / 1e6).toFixed(1)}M USD, regimen=${ultimoGEX.regimen}, instrumentos=${ultimoGEX.instrumentosUsados}`
+    );
+  } catch (err) {
+    console.error("[gex] error consultando Deribit:", err.message);
+    // no tocamos ultimoGEX -- mejor mostrar el ultimo valor valido (aunque
+    // este un poco viejo) que borrarlo por un fallo transitorio de red
+  }
+}
+
+if (!MODO_DEMO) {
+  actualizarGEX();
+  setInterval(actualizarGEX, GEX_INTERVALO_MS);
+}
+
+// -----------------------------------------------------
 // 2) Servidor HTTP (sirve frontend/ + upgrade a websocket)
 // -----------------------------------------------------
 const MIME = {
@@ -247,6 +279,7 @@ setInterval(() => {
     trades: tradesRecientes,
     deltaAgresor: deltaAgresorVentana,
     binance: ultimoEstadoBinance,
+    gex: ultimoGEX,
   });
 
   tradesRecientes = [];

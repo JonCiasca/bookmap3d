@@ -26,6 +26,13 @@
     border-radius: 4px; white-space: nowrap; pointer-events: none;
   }
   .etiqueta.tiempo { color: #9fb8cc; background: rgba(15, 25, 35, 0.4); }
+  .etiqueta.dom { font-weight: bold; background: rgba(5, 8, 12, 0.75); }
+  .etiqueta.dom.bid { color: #8ff0b8; }
+  .etiqueta.dom.ask { color: #ff9aa8; }
+  #gex { margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.12); }
+  #gex .valor { font-weight: bold; }
+  #gex .largo { color: #7fe0a8; }
+  #gex .corto { color: #ff8a9a; }
 </style>
 </head>
 <body>
@@ -35,6 +42,10 @@
   <span id="simbolo">--</span> — profundidad agregada en vivo<br/>
   delta agresor (10s): <span id="delta">--</span><br/>
   <span id="hora-ar">--:--:--</span> (Argentina)
+  <div id="gex">
+    gamma exposure (opciones BTC, Deribit): <span id="gex-valor" class="valor">--</span>
+    <span id="gex-regimen"></span>
+  </div>
 </div>
 <div id="estado" class="caido">conectando...</div>
 <div id="tooltip" style="
@@ -142,9 +153,16 @@ document.body.appendChild(labelRenderer.domElement);
 const controles = new OrbitControls(camara, renderer.domElement);
 controles.target.set(0, 0, -20);
 controles.enableDamping = true;
+controles.dampingFactor = 0.12;
 controles.minDistance = 8;
 controles.maxDistance = 130;
 controles.maxPolarAngle = Math.PI * 0.49;
+// La rueda del mouse por default hace un zoom MULTIPLICATIVO muy agresivo
+// (con mouses/trackpads de alta resolucion, un solo "click" de rueda manda
+// varios eventos wheel seguidos, así que el default zoomSpeed=1 se sentía
+// como saltar de un extremo al otro con un solo movimiento). Bajarlo
+// suaviza el zoom sin perder rango.
+controles.zoomSpeed = 0.35;
 
 escena.add(new THREE.AmbientLight(0xffffff, 0.6));
 const luzDir = new THREE.DirectionalLight(0xffffff, 0.4);
@@ -248,6 +266,114 @@ function agregarTickAlHistorial(niveles) {
     grupoFilas.remove(vieja);
     vieja.geometry === geomBase || vieja.geometry.dispose?.();
     vieja.material.dispose?.();
+  }
+}
+
+// -----------------------------------------------------
+// DOM (Depth Of Market) en vivo. A diferencia de las paredes de historial
+// -- que quedan fijas en el instante en que se crearon y se van alejando
+// hacia atras -- este bloque SIEMPRE muestra el ultimo estado del book, y
+// esta parado justo ADELANTE de "ahora" (z positivo, mas cerca de camara).
+// Es "el espacio antes de entrar a la linea de tiempo real": cada tick
+// nuevo aparece primero aca, con los numeros exactos de bid/ask como una
+// escalera clasica de trading, y recien el tick siguiente ese dato pasa a
+// ser una pared mas del historial que fluye hacia atras.
+// -----------------------------------------------------
+const Z_DOM = 1.8;
+const CANT_ETIQUETAS_DOM = 7; // se muestran espaciadas parejo, igual tecnica que las etiquetas de precio
+
+let domInstanced = null;
+const grupoDOM = new THREE.Group();
+escena.add(grupoDOM);
+const matDOM = new THREE.MeshStandardMaterial({
+  roughness: 0.25, metalness: 0.15, transparent: true, opacity: 1,
+  emissive: 0x223344, emissiveIntensity: 0.35, // leve brillo propio para que se lea como "en vivo", no historial
+});
+
+const baseDOM = new THREE.Mesh(
+  new THREE.BoxGeometry(ANCHO_TOTAL_DESEADO + 1.5, 0.06, ESPACIO_ENTRE_FILAS * 1.1),
+  new THREE.MeshStandardMaterial({
+    color: 0xffe27a, emissive: 0xffe27a, emissiveIntensity: 0.5, transparent: true, opacity: 0.55,
+  })
+);
+baseDOM.position.set(0, -3.03, Z_DOM);
+escena.add(baseDOM);
+
+// divisor luminoso en z=0 ("ahora"): marca la frontera entre el DOM en vivo
+// (adelante) y el historial que ya quedo fijo en el tiempo (atras).
+const divisorAhora = new THREE.Mesh(
+  new THREE.BoxGeometry(ANCHO_TOTAL_DESEADO + 1.5, 0.03, 0.04),
+  new THREE.MeshBasicMaterial({ color: 0x6fa8ff, transparent: true, opacity: 0.45 })
+);
+divisorAhora.position.set(0, -3, 0);
+escena.add(divisorAhora);
+
+const etiquetasDOM = [];
+const grupoEtiquetasDOM = new THREE.Group();
+escena.add(grupoEtiquetasDOM);
+for (let i = 0; i < CANT_ETIQUETAS_DOM; i++) {
+  const et = crearEtiqueta("", "dom");
+  grupoEtiquetasDOM.add(et);
+  etiquetasDOM.push(et);
+}
+
+function actualizarDOM(niveles) {
+  if (domInstanced) {
+    grupoDOM.remove(domInstanced);
+    domInstanced.geometry === geomBase || domInstanced.geometry.dispose?.();
+    domInstanced.material.dispose?.();
+  }
+
+  const cantidad = niveles.length;
+  const instanced = new THREE.InstancedMesh(geomBase, matDOM.clone(), cantidad);
+  instanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cantidad * 3), 3);
+  const alturas = new Array(cantidad); // se reusa para posicionar las etiquetas exactamente sobre cada barra
+
+  niveles.forEach((nivel, i) => {
+    const qty = nivel.bid + nivel.ask;
+    const esBid = nivel.bid >= nivel.ask;
+    const techo = esBid ? techoColorBid : techoColorAsk;
+    const proporcion = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
+    // notoriamente mas alta que las paredes de historial, para que se
+    // distinga a simple vista que esta es "la fila del frente", en vivo
+    const altura = (ALTURA_MIN_PARED + proporcion * (ALTURA_MAX_PARED - ALTURA_MIN_PARED)) * 1.35;
+    alturas[i] = altura;
+
+    _matrizTmp.makeScale(ESCALA_X * 0.95, altura, 1.15);
+    _matrizTmp.setPosition(
+      (i - (niveles.length - 1) / 2) * ESCALA_X,
+      altura / 2 - 3,
+      0
+    );
+    instanced.setMatrixAt(i, _matrizTmp);
+    _colorTmp.copy(colorPorVolumen(qty, techo, esBid));
+    instanced.setColorAt(i, _colorTmp);
+  });
+  instanced.instanceMatrix.needsUpdate = true;
+  if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
+  instanced.position.z = Z_DOM;
+  instanced.userData = { niveles };
+  grupoDOM.add(instanced);
+  domInstanced = instanced;
+
+  // etiquetas numericas: MISMO espaciado parejo que actualizarEtiquetasPrecio
+  // (probado que no se pisan) -- asi cada etiqueta de precio de abajo tiene
+  // arriba, en el DOM, su numero exacto de bid/ask correspondiente.
+  const paso = Math.max(1, Math.floor(niveles.length / (CANT_ETIQUETAS_DOM - 1)));
+  for (let j = 0; j < CANT_ETIQUETAS_DOM; j++) {
+    const idx = Math.min(niveles.length - 1, j * paso);
+    const et = etiquetasDOM[j];
+    const nivel = niveles[idx];
+    if (!nivel) { et.element.textContent = ""; continue; }
+    const esBid = nivel.bid >= nivel.ask;
+    const valor = esBid ? nivel.bid : nivel.ask;
+    et.element.textContent = valor > 0 ? valor.toFixed(2) : "";
+    et.element.className = "etiqueta dom " + (esBid ? "bid" : "ask");
+    et.position.set(
+      (idx - (niveles.length - 1) / 2) * ESCALA_X,
+      alturas[idx] - 3 + 0.6,
+      Z_DOM + 0.7
+    );
   }
 }
 
@@ -361,6 +487,8 @@ const elEstado = document.getElementById("estado");
 const elPrecio = document.getElementById("precio");
 const elSimbolo = document.getElementById("simbolo");
 const elDelta = document.getElementById("delta");
+const elGexValor = document.getElementById("gex-valor");
+const elGexRegimen = document.getElementById("gex-regimen");
 let precioActual = null;
 let acumDelta = 0;
 let ultimoResetDelta = performance.now();
@@ -403,6 +531,16 @@ function conectar() {
 
     agregarTickAlHistorial(data.niveles);
     actualizarEtiquetasPrecio(data.niveles);
+    actualizarDOM(data.niveles);
+
+    if (data.gex) {
+      const millones = data.gex.netGEX / 1e6;
+      const signo = millones >= 0 ? "+" : "";
+      elGexValor.textContent = `${signo}${millones.toFixed(1)}M USD`;
+      elGexRegimen.textContent = data.gex.regimen === "largo" ? "· gamma largo" : "· gamma corto";
+      elGexRegimen.className = data.gex.regimen === "largo" ? "largo" : "corto";
+      elGexValor.className = "valor " + (data.gex.regimen === "largo" ? "largo" : "corto");
+    }
 
     acumDelta += data.deltaAgresor || 0;
     const ahora = performance.now();
@@ -462,7 +600,8 @@ renderer.domElement.addEventListener("mouseleave", () => {
 function actualizarTooltip() {
   if (!hoverActivo) return;
   raycaster.setFromCamera(mouseNDC, camara);
-  const intersecciones = raycaster.intersectObjects(grupoFilas.children, false);
+  const objetosHover = domInstanced ? [...grupoFilas.children, domInstanced] : grupoFilas.children;
+  const intersecciones = raycaster.intersectObjects(objetosHover, false);
   if (intersecciones.length > 0) {
     const hit = intersecciones[0];
     const niveles = hit.object.userData.niveles;

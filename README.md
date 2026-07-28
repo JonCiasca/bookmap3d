@@ -1,4 +1,4 @@
-# Bookmap 3D — BTCUSDT
+# Book by JonFlow-MDQ — BTCUSDT
 
 Motor visual: Three.js (WebGL) puro, sin Streamlit ni Plotly. Datos: websocket
 de Binance (push, no polling), así no hay riesgo de rate-limit.
@@ -11,6 +11,7 @@ bookmap3d/
                         y sirve el frontend + el websocket local
     server.js
     orderbook.js
+    gamma.js
     package.json
     .env.example
   frontend/         <- lo que ves en el navegador
@@ -70,8 +71,25 @@ colores, cámara, etc. sin gastar la conexión real.
 - **Delta agresor (10s)**, arriba a la izquierda: volumen neto de compras
   vs. ventas agresivas en la ventana reciente, en USD. Verde = domina la
   compra, rosa = domina la venta.
-- **Tooltip**: pasá el mouse sobre una pared para ver precio, y BTC
-  acumulados en bid y en ask por separado.
+- **Tooltip**: pasá el mouse sobre una pared (o sobre el DOM del frente)
+  para ver precio, y BTC acumulados en bid y en ask por separado.
+- **DOM en vivo**, justo adelante de "ahora" (separado del historial por
+  una línea celeste): a diferencia de las paredes, que quedan fijas en el
+  instante en que se crearon y se alejan hacia atrás, esta fila siempre
+  muestra el book actual, más alta y brillante que el resto, con los
+  números exactos de bid/ask flotando arriba de los niveles marcados —
+  es "la antesala" antes de que ese instante pase a formar parte del
+  historial que fluye hacia atrás.
+- **Gamma exposure (GEX)**, en el panel de info: estimador de gamma neto
+  de las opciones de BTC en Deribit (calculado con open interest público
+  + Black-Scholes a partir del IV que reporta Deribit — no es la posición
+  real de ninguna mesa, es una heurística estándar basada en OI, la misma
+  que usan la mayoría de los trackers públicos de GEX). *Gamma largo*
+  (verde) sugiere que el mercado tiende a estabilizarse; *gamma corto*
+  (rosa) sugiere que los movimientos tienden a amplificarse. Se actualiza
+  cada 60 segundos (configurable, ver `GEX_INTERVALO_MS`) — no depende de
+  Binance, así que si Deribit falla momentáneamente el resto sigue andando
+  normal y simplemente no se actualiza ese dato.
 
 ## Qué ajustar primero
 
@@ -82,6 +100,9 @@ o directo en Render:
 - `BUCKET_SIZE` — ancho en USD de cada pared.
 - `RANGO_BUCKETS` — cuántas paredes para cada lado del precio medio.
 - `INTERVALO_ENVIO_MS` — cada cuánto se manda un tick nuevo al frontend.
+- `GEX_INTERVALO_MS` — cada cuánto se recalcula el gamma exposure desde
+  Deribit (default 60000 = 60s; no hace falta bajarlo mucho, el open
+  interest de opciones no cambia tan rápido).
 
 ## Precisión: qué cambió
 
