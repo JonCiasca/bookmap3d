@@ -11,7 +11,7 @@ services:
       - key: SYMBOL
         value: btcusdt
       - key: BUCKET_SIZE
-        value: "3"
+        value: "5"
       - key: RANGO_BUCKETS
         value: "220"
       - key: INTERVALO_ENVIO_MS
