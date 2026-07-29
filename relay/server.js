@@ -25,9 +25,16 @@
 //      limitaciones de esto. Es independiente del book de Binance, así que
 //      si Deribit falla o tarda, el resto de la app sigue funcionando.
 //
+//   5) Mantiene un precio "ancla" para la ventana de precios visible, que
+//      NO se mueve en cada tick -- solo se re-centra cuando el precio en
+//      vivo se acerca al borde de la ventana (a menos de MARGEN_RECENTRADO
+//      del limite). Asi el precio oscila DENTRO de un rango fijo, como en
+//      un grafico de trading normal, en vez de que la ventana persiga al
+//      precio y este quede siempre pegado al medio de la pantalla.
+//
 // Config por variables de entorno (todas opcionales, ver .env.example):
 //   SYMBOL, BUCKET_SIZE, RANGO_BUCKETS, INTERVALO_ENVIO_MS, PORT, MODO_DEMO,
-//   GEX_INTERVALO_MS
+//   GEX_INTERVALO_MS, MARGEN_RECENTRADO_USD
 
 import http from "node:http";
 import fs from "node:fs";
@@ -42,11 +49,16 @@ const DIR_FRONTEND = path.join(__dirname, "..", "frontend");
 
 const SYMBOL = (process.env.SYMBOL || "btcusdt").toLowerCase();
 const BUCKET_SIZE = Number(process.env.BUCKET_SIZE || 5); // USD por pared
-const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 60); // paredes por lado
+const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 220); // paredes por lado ($1100 c/lado con BUCKET_SIZE=5 = $2200 total)
 const INTERVALO_ENVIO_MS = Number(process.env.INTERVALO_ENVIO_MS || 250);
 const PUERTO = Number(process.env.PORT || 8081);
 const MODO_DEMO = process.env.MODO_DEMO === "1"; // datos sinteticos, sin Binance (para probar sin red)
 const GEX_INTERVALO_MS = Number(process.env.GEX_INTERVALO_MS || 60_000);
+// Cuando el precio en vivo llega a estar a menos de esto (en USD) del borde
+// de la ventana visible, se re-centra. Con BUCKET_SIZE*RANGO_BUCKETS=1100
+// de medio-rango y 700 de margen, el precio puede moverse 400 USD desde el
+// centro antes de que la ventana empiece a re-centrarse.
+const MARGEN_RECENTRADO_USD = Number(process.env.MARGEN_RECENTRADO_USD || 700);
 
 const book = new OrderBook();
 let bufferEventos = [];
@@ -55,6 +67,29 @@ let tradesRecientes = [];
 let deltaAgresorVentana = 0; // + compra agresiva, - venta agresiva (USD notional)
 let wsBinance = null;
 let ultimoEstadoBinance = "desconectado";
+
+// Precio ancla de la ventana visible (ver punto 5 arriba). null hasta el
+// primer tick con datos, ahi arranca centrado en el mid de ese momento.
+let anclaCentro = null;
+
+/**
+ * Actualiza (si hace falta) el ancla de la ventana visible. Se re-centra
+ * en el mid EN VIVO solo cuando este se acerca a menos de
+ * MARGEN_RECENTRADO_USD del borde de la ventana -- el resto del tiempo el
+ * ancla se queda quieta y el precio se mueve libremente dentro del rango.
+ */
+function actualizarAncla(mid) {
+  if (anclaCentro === null) {
+    anclaCentro = mid;
+    return;
+  }
+  const medioRango = BUCKET_SIZE * RANGO_BUCKETS;
+  const bordeSuperior = anclaCentro + medioRango - MARGEN_RECENTRADO_USD;
+  const bordeInferior = anclaCentro - medioRango + MARGEN_RECENTRADO_USD;
+  if (mid >= bordeSuperior || mid <= bordeInferior) {
+    anclaCentro = mid;
+  }
+}
 
 // -----------------------------------------------------
 // 1) Conexion a Binance (con resync automatico ante gaps)
@@ -266,13 +301,22 @@ wss.on("connection", (cliente) => {
 setInterval(() => {
   if (!book.ready) return;
 
-  const { mid, mejorBid, mejorAsk, niveles } = book.agregarPorBuckets(BUCKET_SIZE, RANGO_BUCKETS);
+  const midActual = book.midPrice();
+  if (midActual === null) return;
+  actualizarAncla(midActual);
+
+  const { mid, mejorBid, mejorAsk, centro, niveles } = book.agregarPorBuckets(
+    BUCKET_SIZE,
+    RANGO_BUCKETS,
+    anclaCentro
+  );
   if (mid === null) return;
 
   const payload = JSON.stringify({
     tipo: "tick",
     tiempo: Date.now(),
     mid,
+    centro,
     mejorBid,
     mejorAsk,
     niveles,

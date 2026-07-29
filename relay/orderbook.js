@@ -113,7 +113,17 @@ export class OrderBook {
   }
 
   /**
-   * Agrega el book en "buckets" de precio alrededor del mid.
+   * Agrega el book en "buckets" de precio alrededor de un precio ANCLA.
+   *
+   * OJO con el parametro `precioAncla`: a proposito NO es siempre el mid
+   * en vivo. Si lo fuera, la ventana de precios se re-centraria en CADA
+   * tick, y visualmente el precio actual quedaria siempre pegado al medio
+   * de la pantalla (el book "se mueve", el precio nunca se mueve) -- eso
+   * es lo contrario de un grafico de trading normal, donde el precio
+   * oscila DENTRO de un rango fijo y solo se re-centra cuando se acerca
+   * al borde. Quien llama a esta funcion (server.js) decide el ancla con
+   * esa logica de margen; esta funcion solo dibuja los buckets alrededor
+   * de lo que le pasen.
    *
    * Mejoras de precision vs la version anterior:
    *  - Math.floor en vez de Math.round: cada bucket cubre exactamente
@@ -123,13 +133,17 @@ export class OrderBook {
    *    lado se adivinaba por posicion vs mid, lo que mezclaba compra y
    *    venta justo alrededor del precio (la zona mas importante).
    *
-   * Devuelve { mid, mejorBid, mejorAsk, niveles } donde cada nivel es
-   * { precio, bid, ask }.
+   * Devuelve { mid, mejorBid, mejorAsk, centro, niveles } donde cada nivel
+   * es { precio, bid, ask }. `centro` es el precio exacto (redondeado a
+   * bucket) alrededor del cual se armaron los niveles -- el frontend lo
+   * necesita para ubicar el precio actual y los trades en su posicion
+   * real dentro de la ventana, en vez de asumir que siempre esta al medio.
    */
-  agregarPorBuckets(bucketSize, rango) {
+  agregarPorBuckets(bucketSize, rango, precioAncla) {
     const tope = this.mejorBidAsk();
     if (!tope) return { mid: null, niveles: [] };
     const mid = (tope.mejorBid + tope.mejorAsk) / 2;
+    const ancla = precioAncla ?? mid; // si no pasan ancla, comportamiento viejo (centrado en mid)
 
     const bucketDe = (precio) => Math.floor(precio / bucketSize) * bucketSize;
 
@@ -144,7 +158,7 @@ export class OrderBook {
       asksPorBucket.set(b, (asksPorBucket.get(b) || 0) + qty);
     }
 
-    const centro = bucketDe(mid);
+    const centro = bucketDe(ancla);
     const niveles = [];
     for (let i = -rango; i <= rango; i++) {
       const precio = centro + i * bucketSize;
@@ -155,6 +169,6 @@ export class OrderBook {
       });
     }
 
-    return { mid, mejorBid: tope.mejorBid, mejorAsk: tope.mejorAsk, niveles };
+    return { mid, mejorBid: tope.mejorBid, mejorAsk: tope.mejorAsk, centro, niveles };
   }
 }

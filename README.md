@@ -90,6 +90,37 @@ colores, cámara, etc. sin gastar la conexión real.
   cada 60 segundos (configurable, ver `GEX_INTERVALO_MS`) — no depende de
   Binance, así que si Deribit falla momentáneamente el resto sigue andando
   normal y simplemente no se actualiza ese dato.
+- **Rango de precio ampliado**: por default ahora se ven $1100 para cada
+  lado del precio ancla ($2200 de rango total, más de 2000 pips), antes
+  eran ~$300 cada lado. Se ajusta con `RANGO_BUCKETS` (ver más abajo).
+- **El precio oscila dentro de una ventana fija** (en vez de recentrar el
+  gráfico en cada tick): la ventana visible de precios queda quieta, y el
+  precio en vivo — marcado con una **barra vertical amarilla brillante**
+  que cruza el DOM y las paredes, con su valor exacto flotando arriba —
+  se mueve libremente adentro de esa ventana, como en un gráfico de
+  trading normal. Solo cuando el precio se acerca a menos de
+  `MARGEN_RECENTRADO_USD` (default 700) del borde, la ventana entera se
+  recentra de golpe en el precio actual y vuelve a quedar fija. Antes el
+  gráfico entero se movía en cada tick para mantener el precio siempre en
+  el medio, lo que hacía parecer que "el precio nunca se mueve".
+- **Podés mover la cámara (pan)** para ir a ver la liquidez en otro nivel
+  de precio sin perder el resto de la escena — por ejemplo, mirar qué
+  pasa en $63.000 mientras el precio está en $65.000, siempre que ese
+  precio esté dentro de la ventana cargada (`RANGO_BUCKETS`). El pan es
+  el de OrbitControls de siempre (click derecho + arrastrar en desktop,
+  dos dedos en celu); solo se le subió la velocidad porque la escena
+  ahora es más ancha.
+- **Escena más ancha** (`ANCHO_TOTAL_DESEADO` de 34 a 52) y **colores más
+  intensos** (antes se veían un poco pastel/lavados; ahora la saturación
+  y el contraste de la escala bid/ask son más altos, se distingue mejor
+  la intensidad de cada nivel de un vistazo).
+- **Zoom**: además de rueda del mouse (o pellizco en el celu), hay botones
+  **+ / −** abajo a la derecha de la pantalla, pensados como alternativa
+  cuando el zoom con rueda se siente errático (varía mucho según el mouse
+  y el sistema operativo).
+- **Más brillo en las paredes lejanas**: se empujó el punto donde empieza
+  la niebla (fog) de la escena, así el historial que quedó más atrás en
+  el tiempo no se apaga tan rápido.
 
 ## Qué ajustar primero
 
@@ -98,7 +129,16 @@ o directo en Render:
 
 - `SYMBOL` — el par a seguir (default `btcusdt`).
 - `BUCKET_SIZE` — ancho en USD de cada pared.
-- `RANGO_BUCKETS` — cuántas paredes para cada lado del precio medio.
+- `RANGO_BUCKETS` — cuántas paredes para cada lado del precio ancla
+  (default 220 → con `BUCKET_SIZE=5` son $1100 para cada lado, $2200
+  total). Si querés más rango todavía, subilo — cada bucket extra es más
+  trabajo de render (más instancias por fila, x200 filas de historial).
+- `MARGEN_RECENTRADO_USD` — qué tan cerca del borde de la ventana (en USD)
+  tiene que llegar el precio en vivo para que la ventana se recentre sola
+  (default 700). Más chico = la ventana sigue al precio más pegado; más
+  grande = el precio puede oscilar más libre antes de que todo se mueva.
+  Tiene que ser menor a la mitad del rango total (`RANGO_BUCKETS *
+  BUCKET_SIZE`) o la ventana nunca dejaría de recentrarse.
 - `INTERVALO_ENVIO_MS` — cada cuánto se manda un tick nuevo al frontend.
 - `GEX_INTERVALO_MS` — cada cuánto se recalcula el gamma exposure desde
   Deribit (default 60000 = 60s; no hace falta bajarlo mucho, el open
@@ -181,6 +221,16 @@ lo dejemos configurado así en vez del free.
 
 Cualquier cambio que hagas y subas a `main` (`git push`) hace que Render
 redeploye solo — no hace falta tocar nada del lado de Render de nuevo.
+
+**Ojo con los `envVars` de `render.yaml`**: Render sincroniza automático
+las variables NUEVAS que agregás al Blueprint, pero **no siempre actualiza
+el VALOR de una variable que ya existía** en un servicio ya creado (por
+ejemplo, si cambiás `RANGO_BUCKETS` de 200 a 220 en el archivo, el
+servicio en Render puede seguir usando 200 aunque el push haya sido
+exitoso). Si después de un deploy no ves reflejado un cambio de una
+variable existente, andá al dashboard de Render → tu servicio →
+**Environment** y confirmá/editá el valor ahí a mano; eso siempre
+funciona y dispara un redeploy solo.
 
 ## Para más adelante
 

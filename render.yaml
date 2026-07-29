@@ -13,11 +13,13 @@ services:
       - key: BUCKET_SIZE
         value: "5"
       - key: RANGO_BUCKETS
-        value: "60"
+        value: "220"
       - key: INTERVALO_ENVIO_MS
         value: "250"
       - key: MODO_DEMO
         value: "0"
       - key: GEX_INTERVALO_MS
         value: "60000"
+      - key: MARGEN_RECENTRADO_USD
+        value: "700"
     healthCheckPath: /salud
