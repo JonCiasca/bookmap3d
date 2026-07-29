@@ -63,15 +63,23 @@ colores, cámara, etc. sin gastar la conexión real.
 - **Color**: escala logarítmica con techo adaptativo (sube rápido ante un
   pico, baja lento), igual que Bookmap real — así los colores son
   comparables entre paredes y entre momentos distintos, no "respiran" con
-  cada tick. **Comprador (bid) en blancos y grises** (gris oscuro en
-  volumen bajo, blanco brillante en los picos, sin tinte de color) y
-  **vendedor (ask) en violeta/lila con el matiz fijo** (nunca migra a
-  blanco, así el lado se distingue siempre de un vistazo aunque el
-  volumen sea alto en ambos).
+  cada tick. **Switch de paleta** (abajo a la izquierda, arriba del switch
+  de tiempo): **Clásico** (verde/rojo saturados, con las paredes más
+  grandes resaltadas en amarillo-naranja como en Bookmap real), **Violeta**
+  (comprador blanco/gris, vendedor violeta/lila con matiz fijo) y **B/N**
+  (blanco y negro puro, comprador claro / vendedor oscuro). Cambiar de
+  modo repinta todo al instante, no hace falta esperar a que se regenere
+  el historial.
 - **Burbujas**: cada trade ejecutado real, tamaño = volumen, celeste =
   compra agresiva, rosa = venta agresiva, conectadas por una línea que
-  sigue el recorrido del precio. Flotan apenas por encima de las paredes
-  de historial (no del DOM, que es más alto a propósito).
+  sigue el recorrido del precio. Flotan apenas por encima de la pared de
+  SU propio nivel de precio (no a una altura fija de toda la escena).
+- **Marcas de trades persistentes**: además de la burbuja (que se
+  desvanece a los pocos segundos), cada trade deja una marca fija —
+  amarilla si dominó la compra, naranja si dominó la venta — pegada a la
+  pared del historial en la que ocurrió. A diferencia de la burbuja, esta
+  marca viaja hacia atrás junto con esa pared y queda como registro
+  permanente de dónde hubo ejecuciones, tanto del lado bid como ask.
 - **Marcador de precio en vivo**: barra vertical amarilla con el precio
   exacto, la más alta de la escena — muestra dónde está el precio en vivo
   DENTRO de la ventana fija (ver "el precio oscila..." más abajo). Su
