@@ -179,7 +179,11 @@ const MULT_ALTURA_DOM = 1.7;
 // fija por encima de TODO lo que pueda existir, siempre quedan arriba.
 const ALTURA_TOPE_DOM = ALTURA_MAX_PARED * MULT_ALTURA_DOM - 3;
 const ALTURA_ETIQUETAS_DOM = ALTURA_TOPE_DOM + 0.9;
-const ALTURA_BURBUJAS = ALTURA_TOPE_DOM + 1.8;
+// Las burbujas de trades quedaron flotando MUY alto (pegadas al tope del
+// DOM + margen extra) -- se pidio bajarlas a "apenas arriba del grafico".
+// Referencia mas chica: el tope teorico de una pared de HISTORIAL comun
+// (no del DOM, que es mas alta a proposito) mas un margen finito.
+const ALTURA_BURBUJAS = (ALTURA_MAX_PARED - 3) + 0.5;
 
 // Escala de color tipo Bookmap: NO relativa al maximo de cada tick (eso hace
 // que la escala "respire" y sea imposible comparar una pared con la de hace
@@ -205,16 +209,24 @@ function actualizarTechos(niveles) {
 function colorPorVolumen(qty, techo, esBid) {
   const t = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
   const color = new THREE.Color();
-  // Paleta violeta -> blanco: bid en violeta-azulado, ask en violeta-magenta
-  // (matices distintos para distinguir lado de un vistazo), y a medida que
-  // sube el volumen acumulado migran hacia blanco brillante -- baja la
-  // saturacion y sube fuerte la luminosidad -- en vez de quedarse siempre en
-  // el mismo tono. Mas vivo/intenso y con mas rango que el verde/naranja
-  // anterior.
-  const hue = esBid ? 0.72 : 0.86;
-  const saturacion = Math.max(0.16, 0.88 - t * 0.68);
-  const luminosidad = Math.min(0.94, 0.22 + t * 0.66);
-  color.setHSL(hue, saturacion, luminosidad);
+  if (esBid) {
+    // Comprador: escala de BLANCOS Y GRISES, sin tinte de color -- gris
+    // oscuro en volumen bajo, blanco brillante en los picos. El contraste
+    // fuerte (gris oscuro -> casi blanco) es lo que le da vivacidad, no la
+    // saturacion.
+    const luminosidad = Math.min(0.97, 0.16 + t * 0.81);
+    color.setHSL(0, 0, luminosidad);
+  } else {
+    // Vendedor: violeta/lila con el MATIZ FIJO (a diferencia del intento
+    // anterior, que migraba a blanco y terminaba pareciendose al lado
+    // comprador en los picos). Asi el lado se distingue siempre de un
+    // vistazo, sea cual sea el volumen. Sube saturacion Y luminosidad
+    // juntas con el volumen para que el pico se vea como un lila vivo, no
+    // lavado -- pero nunca deja de ser violeta.
+    const saturacion = Math.min(0.92, 0.55 + t * 0.37);
+    const luminosidad = Math.min(0.82, 0.24 + t * 0.5);
+    color.setHSL(0.8, saturacion, luminosidad);
+  }
   return color;
 }
 
@@ -590,10 +602,12 @@ function actualizarDOM(niveles) {
 // de las paredes, bien visible.
 // -----------------------------------------------------
 // Altura del poste: desde la base (-3, mismo piso que el DOM) hasta bien
-// arriba de las burbujas de trades -- tiene que ser el elemento mas alto de
-// toda la escena para que se note claramente el movimiento en X del precio
-// en vivo dentro de la ventana fija, sin que nada lo tape.
-const ALTURA_TOPE_MARCADOR = ALTURA_BURBUJAS + 3.2;
+// arriba del DOM -- tiene que ser el elemento mas alto de toda la escena
+// para que se note claramente el movimiento en X del precio en vivo dentro
+// de la ventana fija, sin que nada lo tape. Ya NO depende de la altura de
+// las burbujas (que ahora quedan bajas, "apenas sobre el grafico") -- el
+// marcador se mide contra el DOM, que es el elemento mas alto real.
+const ALTURA_TOPE_MARCADOR = ALTURA_TOPE_DOM + 1.5;
 const ALTO_MARCADOR = ALTURA_TOPE_MARCADOR + 3; // base del poste en y=-3, mismo piso que el DOM
 const geomMarcador = new THREE.BoxGeometry(0.22, ALTO_MARCADOR, 0.22);
 const matMarcador = new THREE.MeshBasicMaterial({

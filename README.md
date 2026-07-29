@@ -63,14 +63,15 @@ colores, cámara, etc. sin gastar la conexión real.
 - **Color**: escala logarítmica con techo adaptativo (sube rápido ante un
   pico, baja lento), igual que Bookmap real — así los colores son
   comparables entre paredes y entre momentos distintos, no "respiran" con
-  cada tick. Paleta violeta → blanco: bid en violeta-azulado, ask en
-  violeta-magenta, y a más volumen acumulado el color migra hacia blanco
-  brillante (antes era verde/naranja).
+  cada tick. **Comprador (bid) en blancos y grises** (gris oscuro en
+  volumen bajo, blanco brillante en los picos, sin tinte de color) y
+  **vendedor (ask) en violeta/lila con el matiz fijo** (nunca migra a
+  blanco, así el lado se distingue siempre de un vistazo aunque el
+  volumen sea alto en ambos).
 - **Burbujas**: cada trade ejecutado real, tamaño = volumen, celeste =
   compra agresiva, rosa = venta agresiva, conectadas por una línea que
-  sigue el recorrido del precio. Flotan a una altura fija por encima de
-  TODO el gráfico (paredes y DOM), así una pared vecina más alta no las
-  tapa visualmente.
+  sigue el recorrido del precio. Flotan apenas por encima de las paredes
+  de historial (no del DOM, que es más alto a propósito).
 - **Marcador de precio en vivo**: barra vertical amarilla con el precio
   exacto, la más alta de la escena — muestra dónde está el precio en vivo
   DENTRO de la ventana fija (ver "el precio oscila..." más abajo). Su
