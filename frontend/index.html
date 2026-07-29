@@ -11,7 +11,11 @@
     background: rgba(10, 15, 25, 0.7); padding: 10px 14px; border-radius: 8px;
     font-size: 13px; line-height: 1.5; pointer-events: none;
   }
-  #info b { color: #ffe27a; font-size: 16px; }
+  /* precio/HUD en naranja fuerte a proposito: la escala de paredes ahora
+     migra a blanco en los picos de volumen, asi que un texto blanco o
+     pastel se perderia contra eso -- el naranja se mantiene legible pase
+     lo que pase en la escena de atras. */
+  #info b { color: #ff9d2e; font-size: 16px; }
   #marca { color: #9fb8cc; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; }
   #delta { font-weight: bold; }
   #delta.compra { color: #7fe0a8; }
@@ -21,14 +25,18 @@
     padding: 6px 12px; border-radius: 6px; color: #fff; }
   .ok { background: #1f8a4c; } .caido { background: #a4302a; } .demo { background: #8a6d1f; }
   .etiqueta {
-    font-family: -apple-system, system-ui, sans-serif; font-size: 11px;
+    /* +4px sobre el tamaño anterior (11px) -- se pedían mas grandes, se
+       veian diminutas. */
+    font-family: -apple-system, system-ui, sans-serif; font-size: 15px;
     color: #cfe8ff; background: rgba(15, 25, 35, 0.55); padding: 2px 6px;
     border-radius: 4px; white-space: nowrap; pointer-events: none;
   }
   .etiqueta.tiempo { color: #9fb8cc; background: rgba(15, 25, 35, 0.4); }
   .etiqueta.dom { font-weight: bold; background: rgba(5, 8, 12, 0.75); }
-  .etiqueta.dom.bid { color: #8ff0b8; }
-  .etiqueta.dom.ask { color: #ff9aa8; }
+  /* mismo motivo que #info b: naranja fuerte para que el numero de bid/ask
+     nunca se confunda con el blanco de las paredes de mucho volumen. */
+  .etiqueta.dom.bid { color: #ffb020; }
+  .etiqueta.dom.ask { color: #ff5f2e; }
   #gex { margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.12); }
   #gex .valor { font-weight: bold; }
   #gex .largo { color: #7fe0a8; }
@@ -107,6 +115,20 @@ const ANCHO_TOTAL_DESEADO = 52; // mas ancho de escena -> paredes menos finitas 
 const ALTURA_MAX_PARED = 6;
 const ALTURA_MIN_PARED = 0.12;
 
+// El DOM (fila en vivo) se dibuja mas alto que una pared normal para que se
+// note que es "la fila del frente" -- antes 1.35x, ahora mas amplificado.
+const MULT_ALTURA_DOM = 1.7;
+// Techo teorico: la altura mas alta que puede llegar a tener CUALQUIER
+// barra del DOM (volumen maximo posible). Las etiquetas numericas y las
+// burbujas de trades usan este valor FIJO en vez de la altura de su propio
+// nivel de precio -- antes, si una barra vecina era mas alta, tapaba
+// visualmente (por la perspectiva de la camara) a la etiqueta/burbuja de al
+// lado aunque tecnicamente no estuviera "detras" de nada. Con una altura
+// fija por encima de TODO lo que pueda existir, siempre quedan arriba.
+const ALTURA_TOPE_DOM = ALTURA_MAX_PARED * MULT_ALTURA_DOM - 3;
+const ALTURA_ETIQUETAS_DOM = ALTURA_TOPE_DOM + 0.9;
+const ALTURA_BURBUJAS = ALTURA_TOPE_DOM + 1.8;
+
 // Escala de color tipo Bookmap: NO relativa al maximo de cada tick (eso hace
 // que la escala "respire" y sea imposible comparar una pared con la de hace
 // 20s). Usamos una escala LOGARITMICA con un techo que se adapta lento
@@ -131,14 +153,16 @@ function actualizarTechos(niveles) {
 function colorPorVolumen(qty, techo, esBid) {
   const t = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
   const color = new THREE.Color();
-  // bid: azul->verde brillante. ask: azul->rojo/naranja brillante.
-  // asi de un vistazo se distingue lado (matiz base) e intensidad (brillo).
-  const hueBase = esBid ? 0.38 : 0.02;
-  const hueBajo = 0.58;
-  const hue = hueBajo + (hueBase - hueBajo) * t;
-  // saturacion alta (antes 0.7, se veia lavado/pastel) + curva de luminosidad
-  // mas contrastada -- colores mas intensos sin perder el gradiente.
-  color.setHSL(hue, 0.9, 0.24 + t * 0.36);
+  // Paleta violeta -> blanco: bid en violeta-azulado, ask en violeta-magenta
+  // (matices distintos para distinguir lado de un vistazo), y a medida que
+  // sube el volumen acumulado migran hacia blanco brillante -- baja la
+  // saturacion y sube fuerte la luminosidad -- en vez de quedarse siempre en
+  // el mismo tono. Mas vivo/intenso y con mas rango que el verde/naranja
+  // anterior.
+  const hue = esBid ? 0.72 : 0.86;
+  const saturacion = Math.max(0.16, 0.88 - t * 0.68);
+  const luminosidad = Math.min(0.94, 0.22 + t * 0.66);
+  color.setHSL(hue, saturacion, luminosidad);
   return color;
 }
 
@@ -387,7 +411,10 @@ function agregarTickAlHistorial(niveles) {
 // escalera clasica de trading, y recien el tick siguiente ese dato pasa a
 // ser una pared mas del historial que fluye hacia atras.
 // -----------------------------------------------------
-const Z_DOM = 1.8;
+// Z_DOM mas grande que antes (1.8 -> 3.6): mas distancia entre el DOM y el
+// resto del grafico para que se lea como un bloque separado, no pegado al
+// historial.
+const Z_DOM = 3.6;
 const CANT_ETIQUETAS_DOM = 7; // se muestran espaciadas parejo, igual tecnica que las etiquetas de precio
 
 let domInstanced = null;
@@ -398,8 +425,11 @@ const matDOM = new THREE.MeshStandardMaterial({
   emissive: 0x223344, emissiveIntensity: 0.35, // leve brillo propio para que se lea como "en vivo", no historial
 });
 
+// Placa base mas ancha que las paredes (antes +1.5, ahora +5) para que el
+// DOM se vea como un bloque mas grande/amplificado, no del mismo tamaño que
+// una fila de historial cualquiera.
 const baseDOM = new THREE.Mesh(
-  new THREE.BoxGeometry(ANCHO_TOTAL_DESEADO + 1.5, 0.06, ESPACIO_ENTRE_FILAS * 1.1),
+  new THREE.BoxGeometry(ANCHO_TOTAL_DESEADO + 5, 0.06, ESPACIO_ENTRE_FILAS * 1.4),
   new THREE.MeshStandardMaterial({
     color: 0xffe27a, emissive: 0xffe27a, emissiveIntensity: 0.5, transparent: true, opacity: 0.55,
   })
@@ -449,7 +479,7 @@ function actualizarDOM(niveles) {
     const proporcion = techo > 0 ? Math.min(Math.log1p(qty) / Math.log1p(techo), 1) : 0;
     // notoriamente mas alta que las paredes de historial, para que se
     // distinga a simple vista que esta es "la fila del frente", en vivo
-    const altura = (ALTURA_MIN_PARED + proporcion * (ALTURA_MAX_PARED - ALTURA_MIN_PARED)) * 1.35;
+    const altura = (ALTURA_MIN_PARED + proporcion * (ALTURA_MAX_PARED - ALTURA_MIN_PARED)) * MULT_ALTURA_DOM;
     alturas[i] = altura;
 
     _matrizTmp.makeScale(ESCALA_X * 0.95, altura, 1.15);
@@ -482,9 +512,13 @@ function actualizarDOM(niveles) {
     const valor = esBid ? nivel.bid : nivel.ask;
     et.element.textContent = valor > 0 ? valor.toFixed(2) : "";
     et.element.className = "etiqueta dom " + (esBid ? "bid" : "ask");
+    // Altura FIJA (ALTURA_ETIQUETAS_DOM), no relativa a la barra propia --
+    // asi la etiqueta siempre queda por encima de CUALQUIER barra vecina,
+    // sin importar cual sea mas alta. Antes, pegada a su propia barra, una
+    // pared vecina mas alta la tapaba visualmente.
     et.position.set(
       (idx - (niveles.length - 1) / 2) * ESCALA_X,
-      alturas[idx] - 3 + 0.6,
+      ALTURA_ETIQUETAS_DOM,
       Z_DOM + 0.7
     );
   }
@@ -500,25 +534,32 @@ function actualizarDOM(niveles) {
 // se mueve en X segun el precio en vivo y cruza desde el DOM hasta arriba
 // de las paredes, bien visible.
 // -----------------------------------------------------
-const geomMarcador = new THREE.BoxGeometry(0.16, 10, 0.16);
+// Altura del poste: desde la base (-3, mismo piso que el DOM) hasta bien
+// arriba de las burbujas de trades -- tiene que ser el elemento mas alto de
+// toda la escena para que se note claramente el movimiento en X del precio
+// en vivo dentro de la ventana fija, sin que nada lo tape.
+const ALTURA_TOPE_MARCADOR = ALTURA_BURBUJAS + 3.2;
+const ALTO_MARCADOR = ALTURA_TOPE_MARCADOR + 3; // base del poste en y=-3, mismo piso que el DOM
+const geomMarcador = new THREE.BoxGeometry(0.22, ALTO_MARCADOR, 0.22);
 const matMarcador = new THREE.MeshBasicMaterial({
-  color: 0xfff45c, transparent: true, opacity: 0.85,
+  color: 0xfff45c, transparent: true, opacity: 0.9,
 });
 const marcadorPrecio = new THREE.Mesh(geomMarcador, matMarcador);
-marcadorPrecio.position.set(0, 2, Z_DOM);
+marcadorPrecio.position.set(0, (-3 + ALTURA_TOPE_MARCADOR) / 2, Z_DOM);
 escena.add(marcadorPrecio);
 
 const etiquetaMarcador = crearEtiqueta("--", "dom");
 etiquetaMarcador.element.style.background = "rgba(255, 244, 92, 0.9)";
 etiquetaMarcador.element.style.color = "#1a1400";
 etiquetaMarcador.element.style.fontWeight = "bold";
+etiquetaMarcador.element.style.fontSize = "16px";
 escena.add(etiquetaMarcador);
 
 function actualizarMarcadorPrecio(precio, centro, bucketSize) {
   if (!ESCALA_X || precio == null || centro == null || !bucketSize) return;
   const offsetX = ((precio - centro) / bucketSize) * ESCALA_X;
   marcadorPrecio.position.x = offsetX;
-  etiquetaMarcador.position.set(offsetX, 7.2, Z_DOM);
+  etiquetaMarcador.position.set(offsetX, ALTURA_TOPE_MARCADOR + 0.6, Z_DOM);
   etiquetaMarcador.element.textContent = precio.toLocaleString("en-US", { maximumFractionDigits: 1 });
 }
 
@@ -578,18 +619,13 @@ function agregarTrade(trade, precioReferencia, bucketSize) {
 
   const offsetX = ESCALA_X ? ((trade.precio - precioReferencia) / bucketSize) * ESCALA_X : 0;
 
-  let alturaBase = 0;
-  if (ultimoNiveles) {
-    let mejor = null;
-    let mejorDist = Infinity;
-    for (const nivel of ultimoNiveles) {
-      const dist = Math.abs(nivel.precio - trade.precio);
-      if (dist < mejorDist) { mejorDist = dist; mejor = nivel; }
-    }
-    if (mejor) alturaBase = alturaEscenaDeNivel(mejor) - 3;
-  }
-
-  mesh.position.set(offsetX, alturaBase + radio + 0.35, 0.4);
+  // Altura FIJA (ALTURA_BURBUJAS), no relativa a la pared de su propio nivel
+  // de precio. Antes se calculaba pegada a la altura de esa pared puntual,
+  // pero con paredes vecinas mas altas (por la perspectiva de camara desde
+  // arriba) las burbujas quedaban visualmente hundidas/tapadas entre los
+  // picos de al lado. Ahora siempre flotan claramente arriba de TODO el
+  // grafico (paredes, DOM y sus etiquetas), como una capa aparte.
+  mesh.position.set(offsetX, ALTURA_BURBUJAS + radio, 0.4);
 
   grupoBurbujas.add(mesh);
   burbujas.push({ mesh, vida: 0 });

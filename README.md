@@ -63,23 +63,36 @@ colores, cámara, etc. sin gastar la conexión real.
 - **Color**: escala logarítmica con techo adaptativo (sube rápido ante un
   pico, baja lento), igual que Bookmap real — así los colores son
   comparables entre paredes y entre momentos distintos, no "respiran" con
-  cada tick. Bid tiende a verde, ask a naranja/rojo; más intensidad =
-  más volumen acumulado ahí.
+  cada tick. Paleta violeta → blanco: bid en violeta-azulado, ask en
+  violeta-magenta, y a más volumen acumulado el color migra hacia blanco
+  brillante (antes era verde/naranja).
 - **Burbujas**: cada trade ejecutado real, tamaño = volumen, celeste =
   compra agresiva, rosa = venta agresiva, conectadas por una línea que
-  sigue el recorrido del precio.
+  sigue el recorrido del precio. Flotan a una altura fija por encima de
+  TODO el gráfico (paredes y DOM), así una pared vecina más alta no las
+  tapa visualmente.
+- **Marcador de precio en vivo**: barra vertical amarilla con el precio
+  exacto, la más alta de la escena — muestra dónde está el precio en vivo
+  DENTRO de la ventana fija (ver "el precio oscila..." más abajo). Su
+  movimiento en X de un tick a otro es justamente lo que hace visible la
+  oscilación.
+- **Textos de precio en naranja fuerte** (HUD y números del DOM): a
+  propósito, para que nunca se confundan con el blanco de las paredes en
+  los picos de volumen.
 - **Delta agresor (10s)**, arriba a la izquierda: volumen neto de compras
   vs. ventas agresivas en la ventana reciente, en USD. Verde = domina la
   compra, rosa = domina la venta.
 - **Tooltip**: pasá el mouse sobre una pared (o sobre el DOM del frente)
   para ver precio, y BTC acumulados en bid y en ask por separado.
-- **DOM en vivo**, justo adelante de "ahora" (separado del historial por
-  una línea celeste): a diferencia de las paredes, que quedan fijas en el
-  instante en que se crearon y se alejan hacia atrás, esta fila siempre
-  muestra el book actual, más alta y brillante que el resto, con los
-  números exactos de bid/ask flotando arriba de los niveles marcados —
-  es "la antesala" antes de que ese instante pase a formar parte del
-  historial que fluye hacia atrás.
+- **DOM en vivo**, separado del historial por una línea celeste y con más
+  distancia respecto al resto del gráfico que antes: a diferencia de las
+  paredes, que quedan fijas en el instante en que se crearon y se alejan
+  hacia atrás, esta fila siempre muestra el book actual, notoriamente más
+  alta, más ancha y más brillante que el resto (bloque "amplificado" a
+  propósito), con los números exactos de bid/ask flotando SIEMPRE por
+  encima de cualquier barra vecina (antes podían quedar tapados por una
+  pared más alta al lado) — es "la antesala" antes de que ese instante
+  pase a formar parte del historial que fluye hacia atrás.
 - **Gamma exposure (GEX)**, en el panel de info: estimador de gamma neto
   de las opciones de BTC en Deribit (calculado con open interest público
   + Black-Scholes a partir del IV que reporta Deribit — no es la posición
