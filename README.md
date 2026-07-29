@@ -106,6 +106,17 @@ colores, cámara, etc. sin gastar la conexión real.
 - **Rango de precio ampliado**: por default ahora se ven $1100 para cada
   lado del precio ancla ($2200 de rango total, más de 2000 pips), antes
   eran ~$300 cada lado. Se ajusta con `RANGO_BUCKETS` (ver más abajo).
+- **Switch de rango de tiempo**, abajo a la izquierda (`30s / 2m / 5m`):
+  cambia cuánto historial se ve hacia atrás. El historial vive solo en el
+  navegador (se arma con los ticks que van llegando, no hay nada guardado
+  en el server), así que para los modos más largos el frontend no agrega
+  una pared por CADA tick sino una cada N — la cantidad de paredes en
+  pantalla se mantiene más o menos constante sea cual sea el modo, lo que
+  cambia es cuánto tiempo real representa cada una. El número de cada
+  botón es la duración REAL que va a mostrar (se recalcula solo si el
+  server usa otro `INTERVALO_ENVIO_MS`, nunca queda desactualizado).
+  Cambiar de modo vacía el historial que ya estaba armado y arranca de
+  cero con el modo nuevo.
 - **El precio oscila dentro de una ventana fija** (en vez de recentrar el
   gráfico en cada tick): la ventana visible de precios queda quieta, y el
   precio en vivo — marcado con una **barra vertical amarilla brillante**

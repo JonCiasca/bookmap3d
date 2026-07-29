@@ -52,6 +52,17 @@
     cursor: pointer; user-select: none; -webkit-user-select: none;
   }
   #controles-zoom button:active { background: rgba(40, 60, 80, 0.9); }
+  #controles-tiempo {
+    position: fixed; left: 12px; bottom: 16px; z-index: 10;
+    display: flex; gap: 6px;
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+  #controles-tiempo button {
+    border: none; border-radius: 6px; padding: 7px 12px; font-size: 12px;
+    background: rgba(15, 25, 35, 0.75); color: #cfe8ff;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  #controles-tiempo button.activo { background: #ff9d2e; color: #1a1400; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -71,6 +82,7 @@
   <button id="zoom-mas" type="button" aria-label="Acercar">+</button>
   <button id="zoom-menos" type="button" aria-label="Alejar">−</button>
 </div>
+<div id="controles-tiempo"></div>
 <div id="tooltip" style="
   position: fixed; z-index: 20; display: none; pointer-events: none;
   font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
@@ -111,6 +123,46 @@ const WS_URL = (() => {
 let MAX_FILAS_HISTORIAL = 200;   // se puede ajustar via config del server
 let INTERVALO_S = 0.25;          // debe matchear intervaloMs del server (en segundos)
 const ESPACIO_ENTRE_FILAS = 0.5;
+
+// -----------------------------------------------------
+// Rango de tiempo del historial (switch "corto/medio/largo"). El historial
+// de paredes vive SOLO en el navegador (se arma con los ticks que van
+// llegando, el server no guarda nada) -- para mostrar mas tiempo sin que
+// la cantidad de filas (y por lo tanto de draw calls de InstancedMesh)
+// se dispare, en vez de agregar una fila por CADA tick del server, en los
+// modos largos salteamos ticks y agregamos una fila cada N -- la cantidad
+// de filas en pantalla se mantiene mas o menos constante (MAX_FILAS_
+// HISTORIAL), lo que cambia es cuanto tiempo real representa cada una.
+// -----------------------------------------------------
+const PRESETS_TIEMPO = [
+  { id: "corto", segundosObjetivo: null }, // null = sin saltear, maxima resolucion (el comportamiento de antes)
+  { id: "medio", segundosObjetivo: 120 },
+  { id: "largo", segundosObjetivo: 300 },
+];
+let presetTiempoIdx = 0;
+let ticksPorFila = 1;
+let contadorTicksHistorial = 0;
+
+function ticksPorFilaPara(preset) {
+  if (preset.segundosObjetivo == null) return 1;
+  return Math.max(1, Math.round(preset.segundosObjetivo / (MAX_FILAS_HISTORIAL * INTERVALO_S)));
+}
+
+function recalcularTicksPorFila() {
+  ticksPorFila = ticksPorFilaPara(PRESETS_TIEMPO[presetTiempoIdx]);
+}
+
+function duracionTotalSeg() {
+  return Math.round(MAX_FILAS_HISTORIAL * INTERVALO_S * ticksPorFila);
+}
+
+function formatearDuracion(seg) {
+  // minutos SOLO en marcas redondas (120, 180, 240...) -- para el resto
+  // mostrar decimales de minuto ("1.6m") se lee peor que directo en
+  // segundos.
+  if (seg < 120 || seg % 60 !== 0) return `${seg}s`;
+  return `${seg / 60}m`;
+}
 const ANCHO_TOTAL_DESEADO = 52; // mas ancho de escena -> paredes menos finitas con mas buckets
 const ALTURA_MAX_PARED = 6;
 const ALTURA_MIN_PARED = 0.12;
@@ -305,12 +357,15 @@ const grupoEjeTiempo = new THREE.Group();
 escena.add(grupoEjeTiempo);
 function reconstruirEjeTiempo() {
   grupoEjeTiempo.clear();
-  const totalSeg = Math.round(MAX_FILAS_HISTORIAL * INTERVALO_S);
+  // el intervalo EFECTIVO por fila es INTERVALO_S * ticksPorFila -- en los
+  // modos "medio"/"largo" cada fila representa varios ticks del server.
+  const intervaloEfectivoS = INTERVALO_S * ticksPorFila;
+  const totalSeg = duracionTotalSeg();
   const pasos = 5;
   for (let i = 1; i <= pasos; i++) {
     const seg = Math.round((totalSeg / pasos) * i);
-    const z = -(seg / INTERVALO_S) * ESPACIO_ENTRE_FILAS;
-    const et = crearEtiqueta(`-${seg}s`, "tiempo");
+    const z = -(seg / intervaloEfectivoS) * ESPACIO_ENTRE_FILAS;
+    const et = crearEtiqueta(`-${formatearDuracion(seg)}`, "tiempo");
     et.position.set(-ANCHO_TOTAL_DESEADO / 2 - 2, -2.7, z);
     grupoEjeTiempo.add(et);
   }
@@ -632,7 +687,10 @@ function agregarTrade(trade, precioReferencia, bucketSize) {
 }
 
 function actualizarBurbujas(dt) {
-  const velocidadZ = ESPACIO_ENTRE_FILAS / INTERVALO_S;
+  // usa el intervalo EFECTIVO (con el saltado de ticksPorFila aplicado) para
+  // que la velocidad de las burbujas siga siendo la misma con la que las
+  // paredes se corren hacia atras, sea cual sea el modo de tiempo elegido.
+  const velocidadZ = ESPACIO_ENTRE_FILAS / (INTERVALO_S * ticksPorFila);
   for (let i = burbujas.length - 1; i >= 0; i--) {
     const b = burbujas[i];
     b.vida += dt;
@@ -660,6 +718,71 @@ function actualizarBurbujas(dt) {
     escena.add(lineaTrades);
   }
 }
+
+// -----------------------------------------------------
+// Switch de rango de tiempo (corto/medio/largo). Cambiar de modo vacia el
+// historial que ya estaba armado -- las filas viejas fueron construidas
+// con el ticksPorFila ANTERIOR, asi que mezclarlas con las nuevas haria
+// que cada una representara una porcion de tiempo distinta. Es mas prolijo
+// arrancar de cero y dejar que se vuelva a llenar con el modo nuevo.
+// -----------------------------------------------------
+function limpiarHistorial() {
+  for (const f of filas) {
+    grupoFilas.remove(f);
+    f.dispose?.();
+  }
+  filas.length = 0;
+  for (const b of burbujas) {
+    grupoBurbujas.remove(b.mesh);
+    b.mesh.geometry.dispose();
+    b.mesh.material.dispose();
+  }
+  burbujas.length = 0;
+  if (lineaTrades) {
+    escena.remove(lineaTrades);
+    lineaTrades.geometry.dispose();
+    lineaTrades.material.dispose();
+    lineaTrades = null;
+  }
+}
+
+const contenedorBotonesTiempo = document.getElementById("controles-tiempo");
+PRESETS_TIEMPO.forEach((preset, idx) => {
+  const boton = document.createElement("button");
+  boton.type = "button";
+  boton.dataset.idx = String(idx);
+  contenedorBotonesTiempo.appendChild(boton);
+});
+
+function actualizarBotonesTiempo() {
+  const botones = contenedorBotonesTiempo.querySelectorAll("button");
+  botones.forEach((boton, idx) => {
+    const preset = PRESETS_TIEMPO[idx];
+    // el label muestra la duracion REAL que va a quedar en pantalla para
+    // ESE preset, no un numero fijo -- si el server usa otro INTERVALO_
+    // ENVIO_MS, el boton siempre dice la verdad en vez de prometer un
+    // "2m"/"5m" que despues no es exacto.
+    const seg = Math.round(MAX_FILAS_HISTORIAL * INTERVALO_S * ticksPorFilaPara(preset));
+    boton.textContent = formatearDuracion(seg);
+    boton.classList.toggle("activo", idx === presetTiempoIdx);
+  });
+}
+actualizarBotonesTiempo();
+
+function seleccionarPresetTiempo(idx) {
+  if (idx === presetTiempoIdx) return;
+  presetTiempoIdx = idx;
+  recalcularTicksPorFila();
+  contadorTicksHistorial = 0;
+  limpiarHistorial();
+  reconstruirEjeTiempo();
+  actualizarBotonesTiempo();
+}
+contenedorBotonesTiempo.addEventListener("click", (ev) => {
+  const boton = ev.target.closest("button");
+  if (!boton) return;
+  seleccionarPresetTiempo(Number(boton.dataset.idx));
+});
 
 // -----------------------------------------------------
 // Conexion al relay
@@ -694,6 +817,8 @@ function conectar() {
     if (data.tipo === "config") {
       if (data.symbol) elSimbolo.textContent = data.symbol;
       if (data.intervaloMs) INTERVALO_S = data.intervaloMs / 1000;
+      recalcularTicksPorFila();
+      actualizarBotonesTiempo();
       reconstruirEjeTiempo();
       return;
     }
@@ -710,7 +835,13 @@ function conectar() {
     precioActual = data.mid;
     elPrecio.textContent = precioActual.toFixed(1);
 
-    agregarTickAlHistorial(data.niveles);
+    // el DOM, las etiquetas de precio y el marcador reflejan el book EN
+    // VIVO, se actualizan siempre. Las paredes de historial son las que se
+    // saltean segun el modo de tiempo elegido (ver PRESETS_TIEMPO).
+    contadorTicksHistorial++;
+    if (contadorTicksHistorial % ticksPorFila === 0) {
+      agregarTickAlHistorial(data.niveles);
+    }
     actualizarEtiquetasPrecio(data.niveles);
     actualizarDOM(data.niveles);
 
