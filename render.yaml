@@ -22,4 +22,6 @@ services:
         value: "60000"
       - key: MARGEN_RECENTRADO_USD
         value: "700"
+      - key: PASO_PAN_USD
+        value: "150"
     healthCheckPath: /salud

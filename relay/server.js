@@ -30,11 +30,14 @@
 //      vivo se acerca al borde de la ventana (a menos de MARGEN_RECENTRADO
 //      del limite). Asi el precio oscila DENTRO de un rango fijo, como en
 //      un grafico de trading normal, en vez de que la ventana persiga al
-//      precio y este quede siempre pegado al medio de la pantalla.
+//      precio y este quede siempre pegado al medio de la pantalla. El
+//      frontend puede tambien pedir un pan MANUAL (flechas arriba/abajo),
+//      que pausa este auto-recentrado hasta que el usuario pide volver a
+//      seguir el precio en vivo -- ver modoManual mas abajo.
 //
 // Config por variables de entorno (todas opcionales, ver .env.example):
 //   SYMBOL, BUCKET_SIZE, RANGO_BUCKETS, INTERVALO_ENVIO_MS, PORT, MODO_DEMO,
-//   GEX_INTERVALO_MS, MARGEN_RECENTRADO_USD
+//   GEX_INTERVALO_MS, MARGEN_RECENTRADO_USD, PASO_PAN_USD
 
 import http from "node:http";
 import fs from "node:fs";
@@ -59,6 +62,9 @@ const GEX_INTERVALO_MS = Number(process.env.GEX_INTERVALO_MS || 60_000);
 // de medio-rango y 700 de margen, el precio puede moverse 400 USD desde el
 // centro antes de que la ventana empiece a re-centrarse.
 const MARGEN_RECENTRADO_USD = Number(process.env.MARGEN_RECENTRADO_USD || 700);
+// Cuanto se mueve el ancla (en USD) por cada click de las flechas de pan
+// manual del frontend (ver mas abajo, mensajes {tipo:"pan"} del cliente).
+const PASO_PAN_USD = Number(process.env.PASO_PAN_USD || 150);
 
 const book = new OrderBook();
 let bufferEventos = [];
@@ -72,17 +78,27 @@ let ultimoEstadoBinance = "desconectado";
 // primer tick con datos, ahi arranca centrado en el mid de ese momento.
 let anclaCentro = null;
 
+// Modo manual: se activa cuando el usuario usa las flechas de pan del
+// frontend (mensaje {tipo:"pan"}) y pausa el auto-recentrado de abajo, para
+// que no "pelee" contra el pan manual y lo cancele en el tick siguiente. Se
+// desactiva con {tipo:"seguir"} (click en el badge de estado del frontend
+// cuando esta en manual), que ademas re-centra de una en el mid actual.
+let modoManual = false;
+
 /**
  * Actualiza (si hace falta) el ancla de la ventana visible. Se re-centra
  * en el mid EN VIVO solo cuando este se acerca a menos de
  * MARGEN_RECENTRADO_USD del borde de la ventana -- el resto del tiempo el
  * ancla se queda quieta y el precio se mueve libremente dentro del rango.
+ * Si el usuario esta paneando a mano (modoManual), no se toca el ancla aca
+ * -- la mueven directamente los mensajes "pan"/"seguir" de mas abajo.
  */
 function actualizarAncla(mid) {
   if (anclaCentro === null) {
     anclaCentro = mid;
     return;
   }
+  if (modoManual) return;
   const medioRango = BUCKET_SIZE * RANGO_BUCKETS;
   const bordeSuperior = anclaCentro + medioRango - MARGEN_RECENTRADO_USD;
   const bordeInferior = anclaCentro - medioRango + MARGEN_RECENTRADO_USD;
@@ -296,6 +312,28 @@ wss.on("connection", (cliente) => {
     bucketSize: BUCKET_SIZE,
     intervaloMs: INTERVALO_ENVIO_MS,
   }));
+
+  // Mensajes entrantes: pan manual (flechas del frontend) y "volver a
+  // seguir en vivo" (click en el badge de estado cuando esta en manual).
+  // Cualquier cliente conectado puede mandarlos -- no hay multi-usuario
+  // real todavia, es un tablero personal, asi que no hace falta distinguir
+  // quien pidio que.
+  cliente.on("message", (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return; // mensaje invalido, se ignora
+    }
+    if (msg.tipo === "pan" && anclaCentro !== null) {
+      modoManual = true;
+      anclaCentro += (msg.direccion >= 0 ? 1 : -1) * PASO_PAN_USD;
+    } else if (msg.tipo === "seguir") {
+      modoManual = false;
+      const midActual = book.midPrice();
+      if (midActual !== null) anclaCentro = midActual;
+    }
+  });
 });
 
 setInterval(() => {
@@ -324,6 +362,7 @@ setInterval(() => {
     deltaAgresor: deltaAgresorVentana,
     binance: ultimoEstadoBinance,
     gex: ultimoGEX,
+    modoManual,
   });
 
   tradesRecientes = [];

@@ -24,6 +24,10 @@
     font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
     padding: 6px 12px; border-radius: 6px; color: #fff; }
   .ok { background: #1f8a4c; } .caido { background: #a4302a; } .demo { background: #8a6d1f; }
+  /* manual: el usuario paneo el rango de precio a mano (flechas de abajo),
+     el auto-recentrado del server esta en pausa -- clickeable para volver
+     a seguir el precio en vivo. */
+  .manual { background: #6b4d1f; cursor: pointer; }
   .etiqueta {
     /* +4px sobre el tamaño anterior (11px) -- se pedían mas grandes, se
        veian diminutas. */
@@ -90,8 +94,10 @@
 </div>
 <div id="estado" class="caido">conectando...</div>
 <div id="controles-zoom">
+  <button id="pan-arriba" type="button" aria-label="Subir el rango de precio visible">↑</button>
   <button id="zoom-mas" type="button" aria-label="Acercar">+</button>
   <button id="zoom-menos" type="button" aria-label="Alejar">−</button>
+  <button id="pan-abajo" type="button" aria-label="Bajar el rango de precio visible">↓</button>
 </div>
 <div id="controles-tiempo"></div>
 <div id="controles-color"></div>
@@ -1025,14 +1031,42 @@ const elGexRegimen = document.getElementById("gex-regimen");
 let precioActual = null;
 let acumDelta = 0;
 let ultimoResetDelta = performance.now();
+// Ultimo centro de ventana conocido -- para detectar cuando el server
+// re-centra el ancla (ver correccion mas abajo, en ws.onmessage).
+let ultimoCentroConocido = null;
 // trades acumulados desde la ULTIMA fila creada -- en modo tiempo medio/
 // largo se saltean varios ticks del server por cada fila (ver
 // ticksPorFila), asi que los trades de los ticks salteados no se pierden:
 // se van juntando aca y se le pasan todos juntos a la fila que SI se crea.
 let tradesAcumulados = [];
 
+// Referencia al socket activo -- la necesitan los botones de pan (fuera de
+// conectar()) para poder mandarle mensajes al server sin duplicar la
+// conexion.
+let wsActivo = null;
+
+function enviarAlServer(msg) {
+  if (wsActivo && wsActivo.readyState === WebSocket.OPEN) {
+    wsActivo.send(JSON.stringify(msg));
+  }
+}
+
+document.getElementById("pan-arriba").addEventListener("click", () => {
+  enviarAlServer({ tipo: "pan", direccion: 1 });
+});
+document.getElementById("pan-abajo").addEventListener("click", () => {
+  enviarAlServer({ tipo: "pan", direccion: -1 });
+});
+// El badge de estado, cuando esta en modo manual, funciona como boton para
+// volver a seguir el precio en vivo (ver mas abajo donde se le pone la
+// clase "manual").
+elEstado.addEventListener("click", () => {
+  if (elEstado.classList.contains("manual")) enviarAlServer({ tipo: "seguir" });
+});
+
 function conectar() {
   const ws = new WebSocket(WS_URL);
+  wsActivo = ws;
 
   ws.onopen = () => {
     elEstado.textContent = "en vivo";
@@ -1061,13 +1095,52 @@ function conectar() {
     if (data.binance === "demo") {
       elEstado.textContent = "demo (sin Binance)";
       elEstado.className = "demo";
-    } else if (elEstado.className !== "ok") {
+    } else if (elEstado.className !== "ok" && elEstado.className !== "manual") {
+      elEstado.textContent = "en vivo";
+      elEstado.className = "ok";
+    }
+    // Modo manual: el usuario paneo con las flechas y el auto-recentrado
+    // del server esta pausado (ver server.js) -- se refleja en el badge,
+    // que ademas funciona como boton para volver a "en vivo" (ver el click
+    // listener mas arriba, junto a wsActivo).
+    if (data.modoManual && data.binance !== "demo") {
+      elEstado.textContent = "manual (click para seguir en vivo)";
+      elEstado.className = "manual";
+    } else if (!data.modoManual && elEstado.className === "manual") {
       elEstado.textContent = "en vivo";
       elEstado.className = "ok";
     }
 
     precioActual = data.mid;
     elPrecio.textContent = precioActual.toFixed(1);
+
+    const bucketSize = data.niveles.length > 1
+      ? Math.abs(data.niveles[1].precio - data.niveles[0].precio)
+      : 5;
+    // Las paredes (niveles) ahora estan armadas alrededor de data.centro, el
+    // ancla de la ventana FIJA -- NO alrededor del precio en vivo (que
+    // oscila libre adentro de esa ventana, ver orderbook.js).
+    const centroVentana = data.centro ?? precioActual;
+
+    // CORRECCION DE RE-CENTRADO (fix del escalon falso en el historial):
+    // cada fila de historial se dibuja con sus paredes centradas en el
+    // ancla que tenia el server EN ESE MOMENTO (centroVentana). Cuando el
+    // precio en vivo se acerca al borde de la ventana, el server salta el
+    // ancla a un nuevo centro (ver MARGEN_RECENTRADO_USD en server.js) --
+    // pero las filas YA DIBUJADAS se quedaban con su posicion vieja, asi
+    // que el salto se veia como un escalon en X que no correspondia a
+    // ningun movimiento real de precio (incluso podia ir para el lado
+    // contrario al que se movio el precio real). Ahora, apenas detectamos
+    // que el ancla cambio, corremos TODAS las filas y burbujas ya
+    // existentes por el delta exacto -- quedan alineadas a un mismo eje de
+    // precio absoluto y el re-centrado pasa a ser invisible: no hay salto,
+    // solo se corrio la ventana visible.
+    if (ultimoCentroConocido !== null && ESCALA_X && centroVentana !== ultimoCentroConocido) {
+      const deltaX = ((centroVentana - ultimoCentroConocido) / bucketSize) * ESCALA_X;
+      for (const f of filas) f.position.x -= deltaX;
+      for (const b of burbujas) b.mesh.position.x -= deltaX;
+    }
+    ultimoCentroConocido = centroVentana;
 
     // el DOM, las etiquetas de precio y el marcador reflejan el book EN
     // VIVO, se actualizan siempre. Las paredes de historial son las que se
@@ -1099,15 +1172,9 @@ function conectar() {
     elDelta.textContent = (acumDelta >= 0 ? "+" : "") + Math.round(acumDelta).toLocaleString("en-US") + " USD";
     elDelta.className = acumDelta >= 0 ? "compra" : "venta";
 
-    const bucketSize = data.niveles.length > 1
-      ? Math.abs(data.niveles[1].precio - data.niveles[0].precio)
-      : 5;
-    // Las paredes (niveles) ahora estan armadas alrededor de data.centro, el
-    // ancla de la ventana FIJA -- NO alrededor del precio en vivo (que
-    // oscila libre adentro de esa ventana, ver orderbook.js). Las burbujas
-    // de trades tienen que usar la MISMA referencia que las paredes o van a
-    // quedar mal ubicadas en X apenas el precio se despegue del centro.
-    const centroVentana = data.centro ?? precioActual;
+    // bucketSize/centroVentana ya se calcularon arriba (antes de la
+    // correccion de re-centrado) -- las burbujas usan la MISMA referencia
+    // que las paredes o van a quedar mal ubicadas en X.
     for (const trade of data.trades) {
       agregarTrade(trade, centroVentana, bucketSize);
     }
