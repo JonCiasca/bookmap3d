@@ -13,7 +13,7 @@ services:
       - key: BUCKET_SIZE
         value: "5"
       - key: RANGO_BUCKETS
-        value: "220"
+        value: "500"
       - key: INTERVALO_ENVIO_MS
         value: "250"
       - key: MODO_DEMO

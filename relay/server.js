@@ -52,14 +52,14 @@ const DIR_FRONTEND = path.join(__dirname, "..", "frontend");
 
 const SYMBOL = (process.env.SYMBOL || "btcusdt").toLowerCase();
 const BUCKET_SIZE = Number(process.env.BUCKET_SIZE || 5); // USD por pared
-const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 220); // paredes por lado ($1100 c/lado con BUCKET_SIZE=5 = $2200 total)
+const RANGO_BUCKETS = Number(process.env.RANGO_BUCKETS || 500); // paredes por lado ($2500 c/lado con BUCKET_SIZE=5 = $5000 total)
 const INTERVALO_ENVIO_MS = Number(process.env.INTERVALO_ENVIO_MS || 250);
 const PUERTO = Number(process.env.PORT || 8081);
 const MODO_DEMO = process.env.MODO_DEMO === "1"; // datos sinteticos, sin Binance (para probar sin red)
 const GEX_INTERVALO_MS = Number(process.env.GEX_INTERVALO_MS || 60_000);
 // Cuando el precio en vivo llega a estar a menos de esto (en USD) del borde
-// de la ventana visible, se re-centra. Con BUCKET_SIZE*RANGO_BUCKETS=1100
-// de medio-rango y 700 de margen, el precio puede moverse 400 USD desde el
+// de la ventana visible, se re-centra. Con BUCKET_SIZE*RANGO_BUCKETS=2500
+// de medio-rango y 700 de margen, el precio puede moverse 1800 USD desde el
 // centro antes de que la ventana empiece a re-centrarse.
 const MARGEN_RECENTRADO_USD = Number(process.env.MARGEN_RECENTRADO_USD || 700);
 // Cuanto se mueve el ancla (en USD) por cada click de las flechas de pan
