@@ -8,7 +8,7 @@
 //      metodo oficial de sincronizacion (snapshot REST + eventos delta).
 //      Si detecta un gap en la secuencia (evento perdido), se re-sincroniza
 //      solo pidiendo un snapshot nuevo -- antes esto no se detectaba y el
-//      book quedaba desincronizado silenciosamente.
+//      book, quedaba desincronizado silenciosamente.
 //
 //   2) Levanta un servidor HTTP que sirve `frontend/` como sitio estatico
 //      Y ademas un websocket (mismo puerto) al que se conecta el frontend.
