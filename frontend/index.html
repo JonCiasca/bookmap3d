@@ -217,14 +217,53 @@ function actualizarTechos(niveles) {
 }
 
 // -----------------------------------------------------
-// Modos de paleta de color (switch en pantalla). Los 3 con mucha
-// intensidad/brillo, cambia como se distinguen bid/ask entre si:
+// Modos de paleta de color (switch en pantalla).
+//  - bookmap: UNA sola rampa (no distingue bid/ask por color, solo por
+//    posicion arriba/abajo del precio) que va de casi-negro a azul a
+//    celeste a blanco y recien en los extremos reales a amarillo/rojo,
+//    como el BookMap real. Es el modo por defecto.
 //  - clasico: verde/rojo saturados con las paredes MAS grandes resaltadas
-//    en amarillo-naranja, como en Bookmap real.
+//    en amarillo-naranja.
 //  - violeta: comprador blanco/gris, vendedor violeta/lila con matiz fijo.
 //  - grises: blanco y negro puro -- comprador claro, vendedor oscuro.
 // -----------------------------------------------------
+
+// Paradas de la rampa "bookmap": [t, color]. Rango de luminosidad MUCHO
+// mas ancho que el modo clasico (que se movia solo entre 0.2 y 0.72 de
+// luminosidad con saturacion siempre >= 0.85 -- por eso todo el piso
+// cercano al precio se veia como un bloque solido de un unico verde/rojo
+// y se perdian los escalones). Con multiples tramos de matiz + un rango
+// de brillo casi completo (de casi-negro a casi-blanco) cada escalon
+// intermedio cae en una banda de color distinta y se puede leer a simple
+// vista, y el amarillo/naranja/rojo queda reservado para paredes
+// realmente extremas.
+const PARADAS_BOOKMAP = [
+  [0.00, 0x070b12],
+  [0.14, 0x0d2038],
+  [0.30, 0x14406b],
+  [0.46, 0x2a76a8],
+  [0.62, 0x5fc2d9],
+  [0.78, 0xd9f2f5],
+  [0.90, 0xffe27a],
+  [0.97, 0xff9d2e],
+  [1.00, 0xff3b3b],
+];
+const _stopA = new THREE.Color();
+const _stopB = new THREE.Color();
+function colorRampaBookmap(t, destino) {
+  let i = 0;
+  while (i < PARADAS_BOOKMAP.length - 2 && t > PARADAS_BOOKMAP[i + 1][0]) i++;
+  const [t0, c0] = PARADAS_BOOKMAP[i];
+  const [t1, c1] = PARADAS_BOOKMAP[i + 1];
+  const local = t1 > t0 ? (t - t0) / (t1 - t0) : 0;
+  _stopA.set(c0);
+  _stopB.set(c1);
+  destino.copy(_stopA).lerp(_stopB, Math.min(1, Math.max(0, local)));
+  return destino;
+}
+
 const MODOS_COLOR = [
+  { id: "bookmap", label: "BookMap" },
   { id: "clasico", label: "Clásico" },
   { id: "violeta", label: "Violeta" },
   { id: "grises", label: "B/N" },
@@ -236,7 +275,9 @@ function colorPorVolumen(qty, techo, esBid) {
   const color = new THREE.Color();
   const modo = MODOS_COLOR[modoColorIdx].id;
 
-  if (modo === "grises") {
+  if (modo === "bookmap") {
+    colorRampaBookmap(t, color);
+  } else if (modo === "grises") {
     // Blanco y negro: comprador tira a blanco/gris claro, vendedor a gris
     // oscuro/casi negro -- se distinguen por CLARO vs OSCURO, sin usar
     // ningun tinte de color.
