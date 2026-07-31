@@ -133,6 +133,7 @@
   <span id="simbolo">--</span> — profundidad agregada en vivo<br/>
   delta agresor (10s): <span id="delta">--</span><br/>
   trades recibidos (10s): <span id="trades-info">--</span><br/>
+  <span id="msj-binance-linea" style="display:none">mensajes binance (total): <span id="msj-binance">--</span><br/></span>
   <span id="hora-ar">--:--:--</span> (Argentina)
   <div id="gex">
     gamma exposure (opciones BTC, Deribit): <span id="gex-valor" class="valor">--</span>
@@ -1349,6 +1350,8 @@ const elPrecio = document.getElementById("precio");
 const elSimbolo = document.getElementById("simbolo");
 const elDelta = document.getElementById("delta");
 const elTradesInfo = document.getElementById("trades-info");
+const elMsjBinanceLinea = document.getElementById("msj-binance-linea");
+const elMsjBinance = document.getElementById("msj-binance");
 const elGexValor = document.getElementById("gex-valor");
 const elGexRegimen = document.getElementById("gex-regimen");
 let precioActual = null;
@@ -1552,6 +1555,14 @@ function conectar() {
     elTradesInfo.textContent = contadorBigTrades10s > 0
       ? `${contadorTrades10s} (${contadorBigTrades10s} grandes)`
       : `${contadorTrades10s}`;
+
+    // Diagnostico de mensajes crudos de Binance (depth vs aggTrade) -- solo
+    // existe en modo live (server.js no lo manda en modo demo), se muestra
+    // nada mas cuando llega para no confundir en demo.
+    if (data.msjBinance) {
+      elMsjBinanceLinea.style.display = "";
+      elMsjBinance.textContent = `depth ${data.msjBinance.depth} · aggTrade ${data.msjBinance.aggTrade}`;
+    }
 
     // bucketSize/centroVentana ya se calcularon arriba (antes de la
     // correccion de re-centrado) -- las burbujas usan la MISMA referencia

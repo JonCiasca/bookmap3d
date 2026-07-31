@@ -143,6 +143,18 @@ let wsBinance = null;
 let ultimoEstadoBinance = "desconectado";
 let generacionConexion = 0; // se incrementa en cada cambiarMercado() para invalidar callbacks de la conexion vieja
 
+// -----------------------------------------------------
+// Contadores CRUDOS de mensajes de Binance (depth vs aggTrade), sin ningun
+// filtro/gate de por medio -- se incrementan apenas llega el frame del
+// websocket, antes de tocar el book o el tracker de trades. Sirven para
+// diagnosticar en vivo (via el tick al frontend) si Binance realmente esta
+// mandando aggTrade en la conexion actual, sin depender de acceso a los
+// logs de Render. Se resetean en cada cambiarMercado().
+// -----------------------------------------------------
+let contadorMsjDepth = 0;
+let contadorMsjAggTrade = 0;
+const contadorStreamsDesconocidos = new Set();
+
 // Estado del detector de iceberg -- ver ICEBERG_* arriba.
 const trackerIceberg = new Map(); // precio -> { esBid, refills, ultimoRefillTs, consumidoDesde, qtyPreConsumo }
 let historialTradesIceberg = []; // { precio, tiempo } recientes, para confirmar que una caida de qty fue por un trade
@@ -313,6 +325,7 @@ function conectarBinance() {
     const data = msg.data;
 
     if (stream.endsWith("@depth@100ms") || stream.endsWith("@depth")) {
+      contadorMsjDepth++;
       if (esperandoSnapshot || !book.ready) {
         bufferEventos.push(data);
         return;
@@ -330,6 +343,7 @@ function conectarBinance() {
         pedirSnapshotYAplicar();
       }
     } else if (stream.endsWith("@aggTrade")) {
+      contadorMsjAggTrade++;
       const precio = parseFloat(data.p);
       const qty = parseFloat(data.q);
       tradesRecientes.push({
@@ -343,6 +357,13 @@ function conectarBinance() {
         historialTradesIceberg.push({ precio, tiempo: data.T });
         if (historialTradesIceberg.length > 500) historialTradesIceberg.splice(0, historialTradesIceberg.length - 500);
       }
+    } else if (!contadorStreamsDesconocidos.has(stream)) {
+      // No deberia pasar nunca -- si aparece, es la pista de que el nombre
+      // del stream que devuelve Binance no es el que esperamos (ej.
+      // cambio de sufijo/formato). Se loguea UNA vez por nombre para no
+      // inundar los logs.
+      contadorStreamsDesconocidos.add(stream);
+      console.warn(`[binance] stream inesperado, no se está contando: "${stream}"`);
     }
   });
 
@@ -397,6 +418,9 @@ function cambiarMercado(nuevo) {
   historialTradesIceberg = [];
   resyncsRecientes = [];
   ultimoEstadoBinance = "desconectado";
+  contadorMsjDepth = 0;
+  contadorMsjAggTrade = 0;
+  contadorStreamsDesconocidos.clear();
   conectarBinance();
 }
 
@@ -633,6 +657,11 @@ setInterval(() => {
     icebergs,
     imanes,
     syncInestable: resyncsRecientes.length >= UMBRAL_RESYNCS_INESTABLE,
+    // Diagnostico: mensajes CRUDOS recibidos de Binance en esta conexion
+    // (acumulado desde el ultimo cambio de mercado), sin ningun filtro de
+    // por medio -- para saber si Binance realmente esta mandando aggTrade.
+    // Solo tiene sentido fuera de modo demo (ahi no hay conexion real).
+    msjBinance: MODO_DEMO ? null : { depth: contadorMsjDepth, aggTrade: contadorMsjAggTrade },
   });
 
   tradesRecientes = [];
