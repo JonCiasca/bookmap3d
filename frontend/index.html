@@ -132,6 +132,7 @@
   <b id="precio">--</b><br/>
   <span id="simbolo">--</span> — profundidad agregada en vivo<br/>
   delta agresor (10s): <span id="delta">--</span><br/>
+  trades recibidos (10s): <span id="trades-info">--</span><br/>
   <span id="hora-ar">--:--:--</span> (Argentina)
   <div id="gex">
     gamma exposure (opciones BTC, Deribit): <span id="gex-valor" class="valor">--</span>
@@ -145,6 +146,7 @@
 </div>
 <div id="estado" class="caido">conectando...</div>
 <div id="controles-zoom">
+  <button id="reset-camara" type="button" aria-label="Resetear la camara a la vista normal" title="Resetear cámara">⟲</button>
   <button id="pan-arriba" type="button" aria-label="Subir el rango de precio visible">↑</button>
   <button id="zoom-mas" type="button" aria-label="Acercar">+</button>
   <button id="zoom-menos" type="button" aria-label="Alejar">−</button>
@@ -480,6 +482,19 @@ controles.screenSpacePanning = true;
 // captura: ahi SI la captura corre antes de llegar al canvas, sin
 // ambiguedad, y con stopPropagation el evento nunca llega a OrbitControls.
 controles.enableZoom = true;
+
+// Boton "resetear camara": si arrastrando/girando la escena la camara queda
+// en un angulo raro (por ejemplo casi de canto, donde el DOM y las marcas
+// de trade -- que son placas finas -- se ven como una linea o directamente
+// no se distinguen), este boton vuelve a la posicion/target con la que se
+// inicializo la escena. OrbitControls guarda el estado para reset() en el
+// momento en que se CREA el objeto -- pero controles.target.set(...) de
+// arriba se llama DESPUES de crearlo, asi que sin este saveState() explicito
+// reset() volveria al target por defecto (0,0,0), no al real. saveState()
+// ahora, con posicion/target/zoom ya en su valor definitivo, asegura que
+// reset() vuelva exactamente a la vista con la que arranca la app.
+controles.saveState();
+document.getElementById("reset-camara").addEventListener("click", () => controles.reset());
 
 // Zoom manual (dolly): acerca/aleja la camara a lo largo de la linea
 // camara-target, respetando min/maxDistance. La usan tanto el handler de
@@ -1333,11 +1348,21 @@ const elEstado = document.getElementById("estado");
 const elPrecio = document.getElementById("precio");
 const elSimbolo = document.getElementById("simbolo");
 const elDelta = document.getElementById("delta");
+const elTradesInfo = document.getElementById("trades-info");
 const elGexValor = document.getElementById("gex-valor");
 const elGexRegimen = document.getElementById("gex-regimen");
 let precioActual = null;
 let acumDelta = 0;
 let ultimoResetDelta = performance.now();
+// Contador de trades RECIBIDOS del server (no de los que efectivamente se
+// dibujan -- ver mas abajo por que esto importa) en los ultimos 10s, mismo
+// patron que acumDelta. Sirve como diagnostico directo: si esto se queda
+// en 0 en un mercado, el problema es que no llegan trades del relay (dato),
+// no que algo no se este dibujando (render) -- dos causas bien distintas
+// para "no veo las burbujas/marcas de trade".
+let contadorTrades10s = 0;
+let contadorBigTrades10s = 0;
+let ultimoResetContadorTrades = performance.now();
 // Ultimo centro de ventana conocido -- para detectar cuando el server
 // re-centra el ancla (ver correccion mas abajo, en ws.onmessage).
 let ultimoCentroConocido = null;
@@ -1515,6 +1540,18 @@ function conectar() {
     }
     elDelta.textContent = (acumDelta >= 0 ? "+" : "") + Math.round(acumDelta).toLocaleString("en-US") + " USD";
     elDelta.className = acumDelta >= 0 ? "compra" : "venta";
+
+    const bigTradesEsteTick = data.trades.filter((t) => t.precio * t.qty >= UMBRAL_BIG_TRADE_USD).length;
+    contadorTrades10s += data.trades.length;
+    contadorBigTrades10s += bigTradesEsteTick;
+    if (ahora - ultimoResetContadorTrades > 10000) {
+      contadorTrades10s = data.trades.length;
+      contadorBigTrades10s = bigTradesEsteTick;
+      ultimoResetContadorTrades = ahora;
+    }
+    elTradesInfo.textContent = contadorBigTrades10s > 0
+      ? `${contadorTrades10s} (${contadorBigTrades10s} grandes)`
+      : `${contadorTrades10s}`;
 
     // bucketSize/centroVentana ya se calcularon arriba (antes de la
     // correccion de re-centrado) -- las burbujas usan la MISMA referencia
