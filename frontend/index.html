@@ -24,6 +24,13 @@
     font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
     padding: 6px 12px; border-radius: 6px; color: #fff; }
   .ok { background: #1f8a4c; } .caido { background: #a4302a; } .demo { background: #8a6d1f; }
+  /* inestable: el book se la pasa re-sincronizando (ver syncInestable en el
+     tick) -- pasa la mayor parte del tiempo recien reseteado y vacio, asi
+     que en vez de quedar todo en silencio como si no hubiera problema, se
+     avisa explicito con un color de alerta distinto de "caido" (que es solo
+     "no hay conexion al relay", esto es "hay conexion pero Binance no
+     sincroniza"). */
+  .inestable { background: #b8481f; }
   /* manual: el usuario paneo el rango de precio a mano (flechas de abajo),
      el auto-recentrado del server esta en pausa -- clickeable para volver
      a seguir el precio en vivo. */
@@ -45,6 +52,16 @@
   #gex .valor { font-weight: bold; }
   #gex .largo { color: #7fe0a8; }
   #gex .corto { color: #ff8a9a; }
+  /* leyenda chica de los marcadores nuevos -- para no tener que adivinar
+     que significa un halo celeste, un 🧊 o una linea violeta con solo
+     mirar la escena. */
+  #leyenda {
+    margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.12);
+    display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: #9fb8cc;
+  }
+  #leyenda .item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  #leyenda .punto { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  #leyenda .linea { width: 12px; height: 2px; display: inline-block; }
   #controles-zoom {
     position: fixed; right: 12px; bottom: 16px; z-index: 10;
     display: flex; flex-direction: column; gap: 8px;
@@ -119,6 +136,11 @@
   <div id="gex">
     gamma exposure (opciones BTC, Deribit): <span id="gex-valor" class="valor">--</span>
     <span id="gex-regimen"></span>
+  </div>
+  <div id="leyenda">
+    <span class="item"><span class="punto" style="background:#7cfcff"></span>halo = big trade</span>
+    <span class="item">🧊 = posible iceberg</span>
+    <span class="item"><span class="linea" style="background:#b388ff"></span>imán</span>
   </div>
 </div>
 <div id="estado" class="caido">conectando...</div>
@@ -917,6 +939,20 @@ const grupoBurbujas = new THREE.Group();
 escena.add(grupoBurbujas);
 let lineaTrades = null;
 
+// Aro de "big trade": en vez de solo agrandar/abrillantar la MISMA burbuja
+// celeste/rosa (que se pidio hacer mas claro -- costaba distinguirlo de un
+// trade normal), un big trade se marca con un halo del mismo color celeste
+// que ya usa la marca persistente en la pared (COLOR_MARCA_GRANDE),
+// ADEMAS de la burbuja normal -- asi el color de la burbuja sigue
+// indicando el lado (compra/venta) y el halo indica "esto fue grande",
+// sin ambiguedad. Geometria/material COMPARTIDOS entre todos los halos
+// (mismo motivo que geomBase/matBase): no se disponen nunca, solo se
+// dejan de referenciar cuando se remueve la burbuja padre.
+const geomAroBigTrade = new THREE.RingGeometry(1, 1.4, 24);
+const matAroBigTrade = new THREE.MeshBasicMaterial({
+  color: COLOR_MARCA_GRANDE, transparent: true, opacity: 0.85, side: THREE.DoubleSide,
+});
+
 function agregarTrade(trade, precioReferencia, bucketSize) {
   // offsetX primero: si el trade cae fuera de la ventana de precio
   // VISIBLE actual (puede pasar con el zoom de precio en "Detalle"), ni
@@ -933,6 +969,12 @@ function agregarTrade(trade, precioReferencia, bucketSize) {
     color, emissive: color, emissiveIntensity: esGrande ? 1.0 : 0.55, transparent: true, opacity: 0.95,
   });
   const mesh = new THREE.Mesh(geom, mat);
+  if (esGrande) {
+    const aro = new THREE.Mesh(geomAroBigTrade, matAroBigTrade);
+    aro.scale.setScalar(radio * 1.3);
+    aro.rotation.x = -Math.PI / 2; // acostado, como un halo alrededor de la burbuja
+    mesh.add(aro);
+  }
 
   // Altura RELATIVA a la pared de SU PROPIO nivel de precio (no una altura
   // fija de escena) -- se pidio que las burbujas queden "apenas sobre el
@@ -1388,6 +1430,18 @@ function conectar() {
       elEstado.textContent = "manual (click para seguir en vivo)";
       elEstado.className = "manual";
     } else if (!data.modoManual && elEstado.className === "manual") {
+      elEstado.textContent = "en vivo";
+      elEstado.className = "ok";
+    }
+    // El server viene re-sincronizando seguido (ver registrarResync() en
+    // server.js) -- casi siempre significa que Binance esta rechazando o
+    // cortando la conexion de ESTE mercado (geo-bloqueo, rate limit, etc),
+    // no un problema del frontend. Se avisa explicito en vez de dejar todo
+    // congelado en silencio como si no pasara nada.
+    if (data.syncInestable && data.binance !== "demo") {
+      elEstado.textContent = `${mercadoConocido || "conexion"}: re-sincronizando seguido (revisá la consola del server)`;
+      elEstado.className = "inestable";
+    } else if (elEstado.className === "inestable") {
       elEstado.textContent = "en vivo";
       elEstado.className = "ok";
     }

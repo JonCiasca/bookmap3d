@@ -150,6 +150,25 @@ let historialTradesIceberg = []; // { precio, tiempo } recientes, para confirmar
 // Estado del detector de imanes -- ver IMAN_* arriba.
 const emaPorNivel = new Map(); // precio -> EMA de (bid+ask) en ese bucket
 
+// -----------------------------------------------------
+// Salud de la sincronizacion: si el book esta re-sincronizando todo el
+// tiempo (gap tras gap), en la practica pasa la mayor parte del tiempo
+// recien reseteado y vacio -- desde el frontend eso se ve como "no pasa
+// nada" sin ningun aviso de que hay un problema real de conexion. Contamos
+// los resyncs en una ventana corta y, si se pasa de rosca, lo mandamos en
+// el tick para que el badge de estado lo muestre en vez de quedar en
+// silencio.
+// -----------------------------------------------------
+let resyncsRecientes = []; // timestamps de gaps detectados
+const UMBRAL_RESYNCS_INESTABLE = 5;
+const VENTANA_RESYNCS_MS = 10_000;
+
+function registrarResync() {
+  const ahora = Date.now();
+  resyncsRecientes.push(ahora);
+  resyncsRecientes = resyncsRecientes.filter((t) => ahora - t < VENTANA_RESYNCS_MS);
+}
+
 // Precio ancla de la ventana visible (ver punto 5 arriba). null hasta el
 // primer tick con datos, ahi arranca centrado en el mid de ese momento.
 let anclaCentro = null;
@@ -306,7 +325,8 @@ function conectarBinance() {
       if (ICEBERG_ACTIVADO) capturarPreviosYTrackear(data, book.midPrice());
       const resultado = book.aplicarEventoDepth(data);
       if (resultado === "gap") {
-        console.warn("[binance] gap detectado en la secuencia, re-sincronizando...");
+        registrarResync();
+        console.warn(`[binance] gap detectado en la secuencia (${resyncsRecientes.length} en los ultimos ${VENTANA_RESYNCS_MS / 1000}s), re-sincronizando...`);
         pedirSnapshotYAplicar();
       }
     } else if (stream.endsWith("@aggTrade")) {
@@ -375,6 +395,7 @@ function cambiarMercado(nuevo) {
   trackerIceberg.clear();
   emaPorNivel.clear();
   historialTradesIceberg = [];
+  resyncsRecientes = [];
   ultimoEstadoBinance = "desconectado";
   conectarBinance();
 }
@@ -611,6 +632,7 @@ setInterval(() => {
     mercado: mercadoActual,
     icebergs,
     imanes,
+    syncInestable: resyncsRecientes.length >= UMBRAL_RESYNCS_INESTABLE,
   });
 
   tradesRecientes = [];

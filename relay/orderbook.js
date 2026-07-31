@@ -1,6 +1,15 @@
 // orderbook.js
 //
-// Reconstruye el order book local aplicando el metodo OFICIAL de Binance spot:
+// Reconstruye el order book local aplicando el metodo OFICIAL de Binance.
+// OJO: spot y futuros (USD-M) usan reglas LIGERAMENTE distintas -- no es
+// solo el "pu" de continuidad (eso ya estaba separado), tambien difieren el
+// descarte de eventos viejos y la condicion del primer evento. Mezclar la
+// regla de spot para futuros hace que el book futuros re-sincronice todo el
+// tiempo (cada evento normal se mal-interpreta como gap), lo que en la
+// practica significa que el book pasa la mayor parte del tiempo recien
+// reseteado y vacio -- de ahi que "no se vea nada" en futuros.
+//
+// SPOT (https://api.binance.com, streams @depth):
 //   1) Abrir el websocket de depth y bufferizar los eventos que lleguen.
 //   2) Pedir UNA vez el snapshot REST (/api/v3/depth?limit=1000).
 //   3) Descartar del buffer los eventos con u <= lastUpdateId del snapshot.
@@ -9,10 +18,18 @@
 //      ser exactamente lastUpdateId+1. Si hay un salto (gap), el book quedo
 //      desincronizado y hay que volver a pedir snapshot (resync).
 //
-// El paso 5 es la diferencia clave con la version anterior: antes un evento
-// perdido pasaba silenciosamente y el book quedaba "mentiroso" para siempre
-// (niveles fantasma, paredes que ya no existen). Ahora se detecta y se
-// resincroniza solo.
+// FUTUROS USD-M (https://fapi.binance.com, streams @depth) -- ver "How to
+// manage a local order book correctly" en developers.binance.com:
+//   3) Descartar del buffer los eventos con u < lastUpdateId (sin el "=").
+//   4) El PRIMER evento aplicado debe cumplir  U <= lastUpdateId <= u  (SIN
+//      el +1 que usa spot).
+//   5) De ahi en mas, cada evento nuevo debe tener pu === u del evento
+//      anterior aplicado. Si no, resync.
+//
+// El paso 5 (deteccion de gap) es la diferencia clave con la version
+// anterior a todo esto: antes un evento perdido pasaba silenciosamente y el
+// book quedaba "mentiroso" para siempre (niveles fantasma, paredes que ya
+// no existen). Ahora se detecta y se resincroniza solo.
 //
 // bids/asks se guardan como Map(precio -> cantidad). Cantidad 0 = borrar.
 
@@ -62,7 +79,9 @@ export class OrderBook {
   }
 
   /**
-   * Aplica un evento crudo del stream <symbol>@depth (formato spot).
+   * Aplica un evento crudo del stream <symbol>@depth (spot o futuros, segun
+   * this.esFuturos -- ver comentario de la clase con la diferencia exacta
+   * de reglas entre los dos).
    * Devuelve:
    *   "aplicado"   - se aplico bien
    *   "viejo"      - evento anterior al snapshot, se descarta (normal al inicio)
@@ -71,13 +90,25 @@ export class OrderBook {
   aplicarEventoDepth(evento) {
     if (!this.ready || this.desincronizado) return "gap";
 
-    // Evento enteramente anterior al snapshot: descartar.
-    if (evento.u <= this.lastUpdateId) return "viejo";
+    // Evento enteramente anterior al snapshot: descartar. Futuros usa "<"
+    // (no "<="): un evento con u === lastUpdateId es exactamente el que
+    // hace falta para validar el primer evento un poco mas abajo, spot en
+    // cambio SI lo descarta (su regla del primer evento usa lastUpdateId+1,
+    // no lastUpdateId).
+    if (this.esFuturos ? evento.u < this.lastUpdateId : evento.u <= this.lastUpdateId) {
+      return "viejo";
+    }
 
     if (!this.primerEventoAplicado) {
-      // Regla oficial para el primer evento tras el snapshot:
-      // U <= lastUpdateId+1 <= u
-      if (evento.U > this.lastUpdateId + 1) {
+      if (this.esFuturos) {
+        // Futuros: U <= lastUpdateId <= u (SIN el +1 de spot). El "u >=
+        // lastUpdateId" ya quedo garantizado por el descarte de arriba.
+        if (evento.U > this.lastUpdateId) {
+          this.desincronizado = true;
+          return "gap";
+        }
+      } else if (evento.U > this.lastUpdateId + 1) {
+        // Spot: U <= lastUpdateId+1 <= u
         this.desincronizado = true;
         return "gap";
       }
