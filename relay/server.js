@@ -35,9 +35,25 @@
 //      que pausa este auto-recentrado hasta que el usuario pide volver a
 //      seguir el precio en vivo -- ver modoManual mas abajo.
 //
+//   6) Spot vs Futuros (USD-M): UN SOLO mercado conectado a la vez (ver
+//      MERCADOS y cambiarMercado()). El frontend pide el cambio con un
+//      mensaje {tipo:"mercado", valor:"spot"|"futuros"}; el server corta la
+//      conexion vieja y arranca un book nuevo desde cero contra el otro
+//      endpoint de Binance.
+//
+//   7) Detecta posibles ordenes iceberg (un nivel que se consume por un
+//      trade real y vuelve a aparecer con tamaño similar varias veces) y
+//      "imanes" (niveles cuyo tamaño se sostuvo grande en el tiempo, no solo
+//      en el tick actual) -- ver ICEBERG_* / IMAN_* mas abajo. Las dos son
+//      heuristicas de mejor esfuerzo, mismo espiritu que el estimador de GEX.
+//
 // Config por variables de entorno (todas opcionales, ver .env.example):
 //   SYMBOL, BUCKET_SIZE, RANGO_BUCKETS, INTERVALO_ENVIO_MS, PORT, MODO_DEMO,
-//   GEX_INTERVALO_MS, MARGEN_RECENTRADO_USD, PASO_PAN_USD
+//   GEX_INTERVALO_MS, MARGEN_RECENTRADO_USD, PASO_PAN_USD, MERCADO_INICIAL,
+//   ICEBERG_ACTIVADO, ICEBERG_DISTANCIA_USD, ICEBERG_CAIDA_MINIMA,
+//   ICEBERG_REFILL_MINIMO, ICEBERG_VENTANA_REFILL_MS, ICEBERG_REFILLS_PARA_FLAG,
+//   ICEBERG_EXPIRA_MS, ICEBERG_QTY_MINIMA, IMAN_ACTIVADO, IMAN_ALPHA,
+//   IMAN_FACTOR, IMAN_MAX_ENVIADOS, IMAN_QTY_MINIMA
 
 import http from "node:http";
 import fs from "node:fs";
@@ -57,6 +73,58 @@ const INTERVALO_ENVIO_MS = Number(process.env.INTERVALO_ENVIO_MS || 250);
 const PUERTO = Number(process.env.PORT || 8081);
 const MODO_DEMO = process.env.MODO_DEMO === "1"; // datos sinteticos, sin Binance (para probar sin red)
 const GEX_INTERVALO_MS = Number(process.env.GEX_INTERVALO_MS || 60_000);
+
+// -----------------------------------------------------
+// Spot vs Futuros (USD-M): UN SOLO mercado conectado a la vez -- correr los
+// dos en simultaneo duplicaria conexion a Binance + book en memoria + costo
+// de agregado por tick para nada (nadie mira los dos a la vez). En cambio,
+// el frontend manda un mensaje {tipo:"mercado", valor:"spot"|"futuros"} y el
+// server corta la conexion actual y arranca una nueva contra el otro
+// endpoint, con su propio book desde cero (ver cambiarMercado()).
+// -----------------------------------------------------
+const MERCADOS = {
+  spot: {
+    restSnapshot: (symbol) => `https://api.binance.com/api/v3/depth?symbol=${symbol.toUpperCase()}&limit=1000`,
+    wsUrl: (symbol) => `wss://stream.binance.com:9443/stream?streams=${symbol}@depth@100ms/${symbol}@aggTrade`,
+    esFuturos: false,
+  },
+  futuros: {
+    restSnapshot: (symbol) => `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol.toUpperCase()}&limit=1000`,
+    wsUrl: (symbol) => `wss://fstream.binance.com/stream?streams=${symbol}@depth@100ms/${symbol}@aggTrade`,
+    esFuturos: true,
+  },
+};
+let mercadoActual = (process.env.MERCADO_INICIAL || "spot").toLowerCase() === "futuros" ? "futuros" : "spot";
+
+// -----------------------------------------------------
+// Deteccion de posibles ordenes iceberg: un nivel que, tras ser consumido
+// por un trade real (no una simple cancelacion), vuelve a aparecer con un
+// tamaño similar varias veces seguidas -- la firma clasica de un iceberg
+// (solo se muestra una fraccion del tamaño real, y se va "recargando" a
+// medida que se ejecuta). Heuristica de mejor esfuerzo, igual espiritu que
+// el estimador de GEX de gamma.js: util como señal, no es certeza.
+// -----------------------------------------------------
+const ICEBERG_ACTIVADO = process.env.ICEBERG_ACTIVADO !== "0";
+const ICEBERG_DISTANCIA_USD = Number(process.env.ICEBERG_DISTANCIA_USD || 250); // solo trackear niveles cerca del touch
+const ICEBERG_CAIDA_MINIMA = Number(process.env.ICEBERG_CAIDA_MINIMA || 0.6); // qty tiene que caer por debajo de este % para contar como "consumido"
+const ICEBERG_REFILL_MINIMO = Number(process.env.ICEBERG_REFILL_MINIMO || 0.75); // y volver a al menos este % para contar como "refill"
+const ICEBERG_VENTANA_REFILL_MS = Number(process.env.ICEBERG_VENTANA_REFILL_MS || 4000);
+const ICEBERG_REFILLS_PARA_FLAG = Number(process.env.ICEBERG_REFILLS_PARA_FLAG || 3);
+const ICEBERG_EXPIRA_MS = Number(process.env.ICEBERG_EXPIRA_MS || 45000);
+const ICEBERG_QTY_MINIMA = Number(process.env.ICEBERG_QTY_MINIMA || 0.05); // ignora niveles chicos (ruido)
+const VENTANA_HISTORIAL_TRADES_MS = 3000; // para confirmar que la caida fue por un trade, no una cancelacion
+
+// -----------------------------------------------------
+// "Imanes": niveles cuyo tamaño se sostuvo grande de forma consistente en
+// el tiempo (EMA lenta), no solo en el tick actual -- candidatos a zona de
+// posible absorcion/soporte-resistencia. Igual que iceberg, es una
+// heuristica basada en lo que se ve en el book, no una certeza.
+// -----------------------------------------------------
+const IMAN_ACTIVADO = process.env.IMAN_ACTIVADO !== "0";
+const IMAN_ALPHA = Number(process.env.IMAN_ALPHA || 0.01); // que tan rapido se adapta la EMA (bajo = tiene que sostenerse mucho tiempo)
+const IMAN_FACTOR = Number(process.env.IMAN_FACTOR || 4); // "iman" si su EMA supera FACTOR veces el promedio de EMAs del momento
+const IMAN_MAX_ENVIADOS = Number(process.env.IMAN_MAX_ENVIADOS || 10);
+const IMAN_QTY_MINIMA = Number(process.env.IMAN_QTY_MINIMA || 0.3); // ignora destaques chicos en horas de poco volumen
 // Cuando el precio en vivo llega a estar a menos de esto (en USD) del borde
 // de la ventana visible, se re-centra. Con BUCKET_SIZE*RANGO_BUCKETS=2500
 // de medio-rango y 700 de margen, el precio puede moverse 1800 USD desde el
@@ -66,13 +134,21 @@ const MARGEN_RECENTRADO_USD = Number(process.env.MARGEN_RECENTRADO_USD || 700);
 // manual del frontend (ver mas abajo, mensajes {tipo:"pan"} del cliente).
 const PASO_PAN_USD = Number(process.env.PASO_PAN_USD || 150);
 
-const book = new OrderBook();
+let book = new OrderBook({ esFuturos: MERCADOS[mercadoActual].esFuturos });
 let bufferEventos = [];
 let esperandoSnapshot = false;
 let tradesRecientes = [];
 let deltaAgresorVentana = 0; // + compra agresiva, - venta agresiva (USD notional)
 let wsBinance = null;
 let ultimoEstadoBinance = "desconectado";
+let generacionConexion = 0; // se incrementa en cada cambiarMercado() para invalidar callbacks de la conexion vieja
+
+// Estado del detector de iceberg -- ver ICEBERG_* arriba.
+const trackerIceberg = new Map(); // precio -> { esBid, refills, ultimoRefillTs, consumidoDesde, qtyPreConsumo }
+let historialTradesIceberg = []; // { precio, tiempo } recientes, para confirmar que una caida de qty fue por un trade
+
+// Estado del detector de imanes -- ver IMAN_* arriba.
+const emaPorNivel = new Map(); // precio -> EMA de (bid+ask) en ese bucket
 
 // Precio ancla de la ventana visible (ver punto 5 arriba). null hasta el
 // primer tick con datos, ahi arranca centrado en el mid de ese momento.
@@ -115,9 +191,7 @@ async function pedirSnapshotYAplicar() {
   book.reset();
   bufferEventos = [];
   try {
-    const resp = await fetch(
-      `https://api.binance.com/api/v3/depth?symbol=${SYMBOL.toUpperCase()}&limit=1000`
-    );
+    const resp = await fetch(MERCADOS[mercadoActual].restSnapshot(SYMBOL));
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const snapshot = await resp.json();
     book.aplicarSnapshotRest(snapshot);
@@ -141,26 +215,95 @@ async function pedirSnapshotYAplicar() {
   }
 }
 
+// -----------------------------------------------------
+// Deteccion de iceberg: se llama por cada nivel que toca un evento de
+// depth, ANTES de que book.aplicarEventoDepth lo pise, asi conocemos el qty
+// previo real. Solo trackeamos niveles cerca del touch (ICEBERG_DISTANCIA_
+// USD) para que el costo sea chico -- lejos del touch un iceberg no es
+// accionable igual.
+// -----------------------------------------------------
+function huboTradeReciente(precio, ahora) {
+  while (historialTradesIceberg.length && ahora - historialTradesIceberg[0].tiempo > VENTANA_HISTORIAL_TRADES_MS) {
+    historialTradesIceberg.shift();
+  }
+  return historialTradesIceberg.some((t) => t.precio === precio);
+}
+
+function trackearIceberg(precio, qtyNueva, esBid, midActual, qtyPrevia) {
+  if (midActual == null || Math.abs(precio - midActual) > ICEBERG_DISTANCIA_USD) {
+    trackerIceberg.delete(precio); // fuera de la zona de interes, no vale la pena seguir sosteniendolo
+    return;
+  }
+  const ahora = Date.now();
+  let t = trackerIceberg.get(precio);
+
+  if (!t) {
+    // Recien ahora vemos una caida fuerte y confirmada por un trade real --
+    // arranca el ciclo de espera de un refill. Si no hay caida, no hace
+    // falta trackear el nivel todavia (evita crear entradas para cada nivel
+    // del book que nunca va a mostrar el patron).
+    if (qtyNueva < qtyPrevia * ICEBERG_CAIDA_MINIMA && qtyPrevia >= ICEBERG_QTY_MINIMA && huboTradeReciente(precio, ahora)) {
+      trackerIceberg.set(precio, { esBid, refills: 0, ultimoRefillTs: 0, consumidoDesde: ahora, qtyPreConsumo: qtyPrevia });
+    }
+    return;
+  }
+
+  if (t.consumidoDesde === null) {
+    if (qtyNueva < qtyPrevia * ICEBERG_CAIDA_MINIMA && qtyPrevia >= ICEBERG_QTY_MINIMA && huboTradeReciente(precio, ahora)) {
+      t.consumidoDesde = ahora;
+      t.qtyPreConsumo = qtyPrevia;
+    }
+  } else if (ahora - t.consumidoDesde > ICEBERG_VENTANA_REFILL_MS) {
+    t.consumidoDesde = null; // se paso el tiempo de espera sin refill, se cierra el ciclo sin contar
+  } else if (qtyNueva >= t.qtyPreConsumo * ICEBERG_REFILL_MINIMO) {
+    t.refills += 1;
+    t.ultimoRefillTs = ahora;
+    t.consumidoDesde = null;
+  }
+}
+
+function capturarPreviosYTrackear(evento, midActual) {
+  for (const [precioStr, qtyStr] of evento.b) {
+    const p = parseFloat(precioStr);
+    const previa = book.bids.get(p) || 0;
+    trackearIceberg(p, parseFloat(qtyStr), true, midActual, previa);
+  }
+  for (const [precioStr, qtyStr] of evento.a) {
+    const p = parseFloat(precioStr);
+    const previa = book.asks.get(p) || 0;
+    trackearIceberg(p, parseFloat(qtyStr), false, midActual, previa);
+  }
+}
+
 function conectarBinance() {
-  const streams = `${SYMBOL}@depth@100ms/${SYMBOL}@aggTrade`;
-  wsBinance = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+  const miGeneracion = ++generacionConexion;
+  const cfg = MERCADOS[mercadoActual];
+  wsBinance = new WebSocket(cfg.wsUrl(SYMBOL));
 
   wsBinance.on("open", () => {
-    console.log("[binance] conectado, streams:", streams);
+    if (miGeneracion !== generacionConexion) return;
+    console.log(`[binance] conectado (${mercadoActual}), streams: ${SYMBOL}@depth@100ms/${SYMBOL}@aggTrade`);
     ultimoEstadoBinance = "conectado";
     pedirSnapshotYAplicar();
   });
 
   wsBinance.on("message", (raw) => {
+    if (miGeneracion !== generacionConexion) return;
     const msg = JSON.parse(raw.toString());
     const stream = msg.stream;
     const data = msg.data;
 
-    if (stream.endsWith("@depth@100ms")) {
+    if (stream.endsWith("@depth@100ms") || stream.endsWith("@depth")) {
       if (esperandoSnapshot || !book.ready) {
         bufferEventos.push(data);
         return;
       }
+      // Capturamos previos y trackeamos iceberg ANTES de aplicar el evento
+      // (aplicarEventoDepth pisa book.bids/book.asks con los valores
+      // nuevos) -- si el evento resulta ser un "gap", igual no pasa nada
+      // grave, el tracker en el peor caso registra un falso consumo que se
+      // va a limpiar solo por ICEBERG_VENTANA_REFILL_MS.
+      if (ICEBERG_ACTIVADO) capturarPreviosYTrackear(data, book.midPrice());
       const resultado = book.aplicarEventoDepth(data);
       if (resultado === "gap") {
         console.warn("[binance] gap detectado en la secuencia, re-sincronizando...");
@@ -176,18 +319,64 @@ function conectarBinance() {
         tiempo: data.T,
       });
       deltaAgresorVentana += data.m ? -(precio * qty) : precio * qty;
+      if (ICEBERG_ACTIVADO) {
+        historialTradesIceberg.push({ precio, tiempo: data.T });
+        if (historialTradesIceberg.length > 500) historialTradesIceberg.splice(0, historialTradesIceberg.length - 500);
+      }
     }
   });
 
   wsBinance.on("close", () => {
+    if (miGeneracion !== generacionConexion) return; // esta conexion ya fue reemplazada a proposito (cambio de mercado)
     ultimoEstadoBinance = "desconectado";
     console.log("[binance] desconectado, reintentando en 3s...");
-    setTimeout(conectarBinance, 3000);
+    setTimeout(() => {
+      if (miGeneracion === generacionConexion) conectarBinance();
+    }, 3000);
   });
 
   wsBinance.on("error", (err) => {
+    if (miGeneracion !== generacionConexion) return;
     console.error("[binance] error de conexion:", err.message);
   });
+}
+
+// -----------------------------------------------------
+// Cambio de mercado (spot <-> futuros) a pedido del frontend (ver mensaje
+// {tipo:"mercado"} mas abajo). Corta la conexion vieja, arranca un book
+// nuevo desde cero (spot y futuros son libros completamente distintos, no
+// tiene sentido mezclar niveles de uno con el otro) y reconecta. En modo
+// demo no hay conexion real que cambiar -- solo actualizamos la etiqueta.
+// -----------------------------------------------------
+function cambiarMercado(nuevo) {
+  if (nuevo !== "spot" && nuevo !== "futuros") return;
+  if (nuevo === mercadoActual) return;
+  console.log(`[mercado] cambiando de ${mercadoActual} a ${nuevo}...`);
+
+  if (MODO_DEMO) {
+    mercadoActual = nuevo;
+    return;
+  }
+
+  if (wsBinance) {
+    wsBinance.removeAllListeners();
+    wsBinance.close();
+    wsBinance = null;
+  }
+  generacionConexion++; // invalida cualquier callback pendiente de la conexion vieja (open/message/close/error)
+  mercadoActual = nuevo;
+  book = new OrderBook({ esFuturos: MERCADOS[nuevo].esFuturos });
+  bufferEventos = [];
+  esperandoSnapshot = false;
+  tradesRecientes = [];
+  deltaAgresorVentana = 0;
+  anclaCentro = null;
+  modoManual = false;
+  trackerIceberg.clear();
+  emaPorNivel.clear();
+  historialTradesIceberg = [];
+  ultimoEstadoBinance = "desconectado";
+  conectarBinance();
 }
 
 // -----------------------------------------------------
@@ -311,6 +500,7 @@ wss.on("connection", (cliente) => {
     symbol: SYMBOL.toUpperCase(),
     bucketSize: BUCKET_SIZE,
     intervaloMs: INTERVALO_ENVIO_MS,
+    mercado: mercadoActual,
   }));
 
   // Mensajes entrantes: pan manual (flechas del frontend) y "volver a
@@ -332,6 +522,8 @@ wss.on("connection", (cliente) => {
       modoManual = false;
       const midActual = book.midPrice();
       if (midActual !== null) anclaCentro = midActual;
+    } else if (msg.tipo === "mercado") {
+      cambiarMercado(msg.valor);
     }
   });
 });
@@ -350,9 +542,62 @@ setInterval(() => {
   );
   if (mid === null) return;
 
+  const ahora = Date.now();
+
+  // Poda de iceberg: entradas que dejaron de refrescarse hace rato (ni un
+  // consumo nuevo ni un refill) ya no aportan nada -- se olvidan.
+  if (ICEBERG_ACTIVADO) {
+    for (const [precio, t] of trackerIceberg) {
+      const ref = t.ultimoRefillTs || t.consumidoDesde || 0;
+      if (ref && ahora - ref > ICEBERG_EXPIRA_MS) trackerIceberg.delete(precio);
+    }
+  }
+  const icebergs = ICEBERG_ACTIVADO
+    ? Array.from(trackerIceberg.entries())
+        .filter(([, t]) => t.refills >= ICEBERG_REFILLS_PARA_FLAG)
+        .map(([precio, t]) => ({ precio, esBid: t.esBid, refills: t.refills }))
+    : [];
+
+  // Imanes: EMA lenta por nivel, reusando el mismo agregado por buckets que
+  // ya se calculo arriba para no iterar el book de nuevo.
+  let imanes = [];
+  if (IMAN_ACTIVADO) {
+    let sumaEma = 0;
+    for (const nivel of niveles) {
+      const qty = nivel.bid + nivel.ask;
+      const prev = emaPorNivel.get(nivel.precio) ?? qty;
+      const ema = prev * (1 - IMAN_ALPHA) + qty * IMAN_ALPHA;
+      emaPorNivel.set(nivel.precio, ema);
+      sumaEma += ema;
+    }
+    // poda perezosa: si el mapa crecio mucho mas alla de la ventana visible
+    // actual (el ancla se movio con el tiempo), se descartan los niveles
+    // que quedaron lejos -- se recalculan solos si el precio vuelve a pasar.
+    if (emaPorNivel.size > niveles.length * 3) {
+      const precioMin = niveles[0].precio - BUCKET_SIZE * RANGO_BUCKETS;
+      const precioMax = niveles[niveles.length - 1].precio + BUCKET_SIZE * RANGO_BUCKETS;
+      for (const p of emaPorNivel.keys()) {
+        if (p < precioMin || p > precioMax) emaPorNivel.delete(p);
+      }
+    }
+    const promedio = niveles.length > 0 ? sumaEma / niveles.length : 0;
+    const umbral = promedio * IMAN_FACTOR;
+    if (umbral > 0) {
+      const candidatos = [];
+      for (const nivel of niveles) {
+        const ema = emaPorNivel.get(nivel.precio) || 0;
+        if (ema >= umbral && ema >= IMAN_QTY_MINIMA) {
+          candidatos.push({ precio: nivel.precio, esBid: nivel.bid >= nivel.ask, intensidad: ema / umbral });
+        }
+      }
+      candidatos.sort((a, b) => b.intensidad - a.intensidad);
+      imanes = candidatos.slice(0, IMAN_MAX_ENVIADOS);
+    }
+  }
+
   const payload = JSON.stringify({
     tipo: "tick",
-    tiempo: Date.now(),
+    tiempo: ahora,
     mid,
     centro,
     mejorBid,
@@ -363,6 +608,9 @@ setInterval(() => {
     binance: ultimoEstadoBinance,
     gex: ultimoGEX,
     modoManual,
+    mercado: mercadoActual,
+    icebergs,
+    imanes,
   });
 
   tradesRecientes = [];

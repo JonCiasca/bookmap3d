@@ -78,6 +78,35 @@
     cursor: pointer; user-select: none; -webkit-user-select: none;
   }
   #controles-color button.activo { background: #ff9d2e; color: #1a1400; font-weight: bold; }
+  #controles-zoom-precio {
+    position: fixed; left: 12px; bottom: 96px; z-index: 10;
+    display: flex; gap: 6px;
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+  #controles-zoom-precio button {
+    border: none; border-radius: 6px; padding: 7px 12px; font-size: 12px;
+    background: rgba(15, 25, 35, 0.75); color: #cfe8ff;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  #controles-zoom-precio button.activo { background: #ff9d2e; color: #1a1400; font-weight: bold; }
+  #controles-mercado {
+    position: fixed; left: 12px; bottom: 136px; z-index: 10;
+    display: flex; gap: 6px;
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+  #controles-mercado button {
+    border: none; border-radius: 6px; padding: 7px 12px; font-size: 12px;
+    background: rgba(15, 25, 35, 0.75); color: #cfe8ff;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  #controles-mercado button.activo { background: #6fa8ff; color: #06131f; font-weight: bold; }
+  /* icebergs: magenta bien saturado a proposito -- no se parece a ningun
+     otro color que ya se use en la escena (paredes, DOM, marcas de trade,
+     imanes), asi no hay ambiguedad de a que corresponde. */
+  .etiqueta.iceberg {
+    background: rgba(255, 46, 196, 0.88); color: #fff; font-size: 13px;
+    padding: 1px 6px; border-radius: 10px; font-weight: bold;
+  }
 </style>
 </head>
 <body>
@@ -101,6 +130,8 @@
 </div>
 <div id="controles-tiempo"></div>
 <div id="controles-color"></div>
+<div id="controles-zoom-precio"></div>
+<div id="controles-mercado"></div>
 <div id="tooltip" style="
   position: fixed; z-index: 20; display: none; pointer-events: none;
   font-family: -apple-system, system-ui, sans-serif; font-size: 12px;
@@ -162,6 +193,37 @@ let presetTiempoIdx = 0;
 let ticksPorFila = 1;
 let contadorTicksHistorial = 0;
 
+// -----------------------------------------------------
+// Zoom de PRECIO (distinto del zoom de camara +/- de abajo a la derecha):
+// en vez de acercar la camara a la escena entera, esto recorta cuantos
+// buckets de precio se dibujan alrededor del centro de la ventana y
+// reparte el mismo ANCHO_TOTAL_DESEADO entre menos buckets -- cada uno
+// queda mas ancho en pantalla, como "estirar" el eje de precio para
+// trabajar con mas separacion visual entre niveles vecinos. El server
+// sigue mandando SIEMPRE el rango completo (RANGO_BUCKETS) en cada tick;
+// esto es puramente un recorte del lado del frontend, no pide menos datos.
+// -----------------------------------------------------
+const ZOOM_PRECIO_PRESETS = [
+  { id: "amplio", label: "Rango amplio", fraccion: 1 },
+  { id: "medio", label: "Medio", fraccion: 0.55 },
+  { id: "cerca", label: "Detalle", fraccion: 0.28 },
+];
+let zoomPrecioIdx = 0;
+
+// Recorta `niveles` (siempre centrado en el ancla del server) a la
+// fraccion central que corresponda al preset activo, conservando el mismo
+// indice central -- asi todo lo que ya usa (i - (largo-1)/2) sigue
+// centrando bien sin tener que tocar esa cuenta en ningun otro lado.
+function recortarNivelesPorZoom(niveles) {
+  const fraccion = ZOOM_PRECIO_PRESETS[zoomPrecioIdx].fraccion;
+  if (fraccion >= 1 || niveles.length < 3) return niveles;
+  const centro = (niveles.length - 1) / 2;
+  const mitad = Math.max(1, Math.round(centro * fraccion));
+  const desde = Math.max(0, Math.round(centro) - mitad);
+  const hasta = Math.min(niveles.length - 1, Math.round(centro) + mitad);
+  return niveles.slice(desde, hasta + 1);
+}
+
 function ticksPorFilaPara(preset) {
   if (preset.segundosObjetivo == null) return 1;
   return Math.max(1, Math.round(preset.segundosObjetivo / (MAX_FILAS_HISTORIAL * INTERVALO_S)));
@@ -199,8 +261,19 @@ const MULT_ALTURA_DOM = 1.7;
 const ALTURA_TOPE_DOM = ALTURA_MAX_PARED * MULT_ALTURA_DOM - 3;
 const ALTURA_ETIQUETAS_DOM = ALTURA_TOPE_DOM + 0.9;
 // margen fijo que se le suma a la altura LOCAL de la pared de un trade para
-// posicionar su burbuja -- ver agregarTrade().
-const MARGEN_BURBUJA = 0.55;
+// posicionar su burbuja -- ver agregarTrade(). Subido un poco (0.55 -> 0.9)
+// porque a veces quedaba tapada por una pared vecina mas alta (limitacion
+// de perspectiva, ver comentario en agregarTrade) -- a proposito NO se
+// volvio a una altura fija grande (eso ya se probo y quedaba "flotando"
+// desconectado de su propia pared), solo un empujon moderado.
+const MARGEN_BURBUJA = 0.9;
+
+// Un trade se considera "grande" (big trade) a partir de este monto
+// nocional (precio * qty, en USD) -- se resalta distinto tanto en la
+// burbuja como en la marca persistente que deja sobre la pared del
+// historial. Ajustable si con BTC a otro precio el umbral deja de tener
+// sentido.
+const UMBRAL_BIG_TRADE_USD = 30000;
 
 // Escala de color tipo Bookmap: NO relativa al maximo de cada tick (eso hace
 // que la escala "respire" y sea imposible comparar una pared con la de hace
@@ -505,6 +578,12 @@ const geomMarca = new THREE.BoxGeometry(1, 1, 1);
 const matMarca = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.95 });
 const COLOR_MARCA_COMPRA = 0xfff176; // amarillo brillante -- agresor comprador
 const COLOR_MARCA_VENTA = 0xff8a3d;  // naranja brillante -- agresor vendedor
+// Big trade: si CUALQUIER trade del tick en ese bucket supero UMBRAL_BIG_
+// TRADE_USD de nocional, la marca se pinta de este color en vez del
+// amarillo/naranja normal -- se prioriza mostrar que hubo un trade grande
+// por sobre de que lado fue, y la marca queda un poco mas alta para que se
+// note como un "pico" distinto entre las marcas comunes.
+const COLOR_MARCA_GRANDE = 0x7cfcff;
 
 function crearFila(niveles) {
   const cantidad = niveles.length;
@@ -558,12 +637,14 @@ function agregarMarcasDeTrades(filaInstanced, niveles, trades) {
   const indicePorPrecio = new Map();
   niveles.forEach((n, i) => indicePorPrecio.set(n.precio, i));
 
-  const acumPorIndice = new Map(); // idx -> { compra, venta }
+  const acumPorIndice = new Map(); // idx -> { compra, venta, nocionalMax }
   for (const trade of trades) {
     const idx = indicePorPrecio.get(bucketDe(trade.precio));
     if (idx === undefined) continue;
-    const entry = acumPorIndice.get(idx) || { compra: 0, venta: 0 };
+    const entry = acumPorIndice.get(idx) || { compra: 0, venta: 0, nocionalMax: 0 };
     if (trade.esVentaAgresiva) entry.venta += trade.qty; else entry.compra += trade.qty;
+    const nocional = trade.precio * trade.qty;
+    if (nocional > entry.nocionalMax) entry.nocionalMax = nocional;
     acumPorIndice.set(idx, entry);
   }
   if (acumPorIndice.size === 0) return;
@@ -575,16 +656,18 @@ function agregarMarcasDeTrades(filaInstanced, niveles, trades) {
   indices.forEach((idx, k) => {
     const nivel = niveles[idx];
     const alturaPared = alturaEscenaDeNivel(nivel); // 0..ALTURA_MAX_PARED
-    const { compra, venta } = acumPorIndice.get(idx);
+    const { compra, venta, nocionalMax } = acumPorIndice.get(idx);
+    const esGrande = nocionalMax >= UMBRAL_BIG_TRADE_USD;
+    const alturaMarca = esGrande ? 0.24 : 0.14; // la de big trade sobresale un poco mas, como un pico
 
-    _matrizTmp.makeScale(ESCALA_X * 0.98, 0.14, ESPACIO_ENTRE_FILAS * 0.9);
+    _matrizTmp.makeScale(ESCALA_X * 0.98, alturaMarca, ESPACIO_ENTRE_FILAS * 0.9);
     _matrizTmp.setPosition(
       (idx - (niveles.length - 1) / 2) * ESCALA_X,
-      (alturaPared - 3) + 0.14, // justo sobre la superficie de ESA pared puntual
+      (alturaPared - 3) + alturaMarca, // justo sobre la superficie de ESA pared puntual
       0
     );
     marcas.setMatrixAt(k, _matrizTmp);
-    _colorTmp.set(compra >= venta ? COLOR_MARCA_COMPRA : COLOR_MARCA_VENTA);
+    _colorTmp.set(esGrande ? COLOR_MARCA_GRANDE : (compra >= venta ? COLOR_MARCA_COMPRA : COLOR_MARCA_VENTA));
     marcas.setColorAt(k, _colorTmp);
   });
   marcas.instanceMatrix.needsUpdate = true;
@@ -745,6 +828,7 @@ function actualizarDOM(niveles) {
       Z_DOM + 0.7
     );
   }
+  return alturas; // la usa actualizarIcebergs() para ubicar el badge sobre la barra correcta
 }
 
 // -----------------------------------------------------
@@ -834,15 +918,21 @@ escena.add(grupoBurbujas);
 let lineaTrades = null;
 
 function agregarTrade(trade, precioReferencia, bucketSize) {
-  const radio = Math.min(1.6, 0.22 + Math.sqrt(trade.qty) * 0.65);
+  // offsetX primero: si el trade cae fuera de la ventana de precio
+  // VISIBLE actual (puede pasar con el zoom de precio en "Detalle"), ni
+  // vale la pena crear la geometria -- ahorra trabajo y evita burbujas
+  // flotando lejos de la escena, fuera de vista.
+  const offsetX = ESCALA_X ? ((trade.precio - precioReferencia) / bucketSize) * ESCALA_X : 0;
+  if (ESCALA_X && Math.abs(offsetX) > ANCHO_TOTAL_DESEADO / 2 + ESCALA_X) return;
+
+  const esGrande = trade.precio * trade.qty >= UMBRAL_BIG_TRADE_USD;
+  const radio = Math.min(esGrande ? 2.0 : 1.6, (esGrande ? 0.32 : 0.22) + Math.sqrt(trade.qty) * 0.65);
   const geom = new THREE.SphereGeometry(radio, 18, 18);
   const color = trade.esVentaAgresiva ? 0xff5c7a : 0xbfe6ff;
   const mat = new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: 0.55, transparent: true, opacity: 0.95,
+    color, emissive: color, emissiveIntensity: esGrande ? 1.0 : 0.55, transparent: true, opacity: 0.95,
   });
   const mesh = new THREE.Mesh(geom, mat);
-
-  const offsetX = ESCALA_X ? ((trade.precio - precioReferencia) / bucketSize) * ESCALA_X : 0;
 
   // Altura RELATIVA a la pared de SU PROPIO nivel de precio (no una altura
   // fija de escena) -- se pidio que las burbujas queden "apenas sobre el
@@ -901,6 +991,112 @@ function actualizarBurbujas(dt) {
 }
 
 // -----------------------------------------------------
+// Icebergs + imanes: el server manda, en cada tick, listas CORTAS de
+// candidatos (ver ICEBERG_*/IMAN_* en server.js) -- aca solo hay que
+// ubicarlos en la ventana de precio VISIBLE actual (que puede estar
+// recortada por el zoom de precio) y dibujarlos con algo liviano.
+// -----------------------------------------------------
+const ICEBERG_MAX_ETIQUETAS = 6;
+const etiquetasIceberg = [];
+const grupoIceberg = new THREE.Group();
+escena.add(grupoIceberg);
+for (let i = 0; i < ICEBERG_MAX_ETIQUETAS; i++) {
+  const et = crearEtiqueta("🧊", "iceberg");
+  et.element.style.display = "none";
+  grupoIceberg.add(et);
+  etiquetasIceberg.push(et);
+}
+
+// alturasDOM la pasa actualizarDOM (ver mas abajo) -- son las alturas YA
+// multiplicadas por MULT_ALTURA_DOM que usa cada barra del DOM en vivo.
+function actualizarIcebergs(icebergs, niveles, alturasDOM) {
+  for (const et of etiquetasIceberg) et.element.style.display = "none";
+  if (!ESCALA_X || !icebergs || !icebergs.length || niveles.length < 2 || !alturasDOM) return;
+
+  const bucketSize = Math.abs(niveles[1].precio - niveles[0].precio);
+  if (!bucketSize) return;
+  const bucketDe = (p) => Math.floor(p / bucketSize) * bucketSize;
+  const indicePorPrecio = new Map();
+  niveles.forEach((n, i) => indicePorPrecio.set(n.precio, i));
+
+  let mostrados = 0;
+  for (const ice of icebergs) {
+    if (mostrados >= ICEBERG_MAX_ETIQUETAS) break;
+    const idx = indicePorPrecio.get(bucketDe(ice.precio));
+    if (idx === undefined) continue; // fuera de la ventana de zoom actual
+    const alturaBarra = alturasDOM[idx] || 0;
+    const x = (idx - (niveles.length - 1) / 2) * ESCALA_X;
+    const et = etiquetasIceberg[mostrados];
+    et.element.style.display = "block";
+    et.position.set(x, -3 + alturaBarra + 0.5, Z_DOM);
+    mostrados++;
+  }
+}
+
+// Imanes: una linea fina y tenue por nivel, corriendo a lo largo de TODO el
+// historial visible (como un "riel") para que se note que es una zona que
+// se sostuvo en el tiempo, no algo puntual del tick actual. Solo se
+// reconstruyen cuando cambia el SET de precios (no en cada tick) -- son
+// pocas lineas (IMAN_MAX_RENDER como mucho) asi que el costo ya es chico,
+// pero total evitar el churn de geometria cuando no cambio nada.
+const IMAN_MAX_RENDER = 6;
+const COLOR_IMAN = 0xb388ff;
+const grupoImanes = new THREE.Group();
+escena.add(grupoImanes);
+let lineasIman = [];
+let clavesImanActuales = "";
+const PROFUNDIDAD_RAIL_IMAN = ESPACIO_ENTRE_FILAS * MAX_FILAS_HISTORIAL;
+
+function limpiarImanes() {
+  for (const linea of lineasIman) {
+    grupoImanes.remove(linea);
+    linea.geometry.dispose();
+    linea.material.dispose();
+  }
+  lineasIman = [];
+  clavesImanActuales = "";
+}
+
+function actualizarImanes(imanes, niveles) {
+  if (!ESCALA_X || niveles.length < 2) return;
+  const bucketSize = Math.abs(niveles[1].precio - niveles[0].precio);
+  if (!bucketSize) return;
+  const bucketDe = (p) => Math.floor(p / bucketSize) * bucketSize;
+  const indicePorPrecio = new Map();
+  niveles.forEach((n, i) => indicePorPrecio.set(n.precio, i));
+
+  const visibles = [];
+  for (const iman of (imanes || []).slice(0, IMAN_MAX_RENDER)) {
+    const idx = indicePorPrecio.get(bucketDe(iman.precio));
+    if (idx === undefined) continue; // fuera de la ventana de zoom actual
+    visibles.push({ precio: iman.precio, idx });
+  }
+
+  const claves = visibles.map((v) => v.precio).sort().join(",");
+  if (claves === clavesImanActuales) return; // mismo set que ya esta dibujado
+  clavesImanActuales = claves;
+
+  for (const linea of lineasIman) {
+    grupoImanes.remove(linea);
+    linea.geometry.dispose();
+    linea.material.dispose();
+  }
+  lineasIman = [];
+
+  for (const v of visibles) {
+    const x = (v.idx - (niveles.length - 1) / 2) * ESCALA_X;
+    const geom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(x, -2.9, Z_DOM),
+      new THREE.Vector3(x, -2.9, -PROFUNDIDAD_RAIL_IMAN),
+    ]);
+    const mat = new THREE.LineBasicMaterial({ color: COLOR_IMAN, transparent: true, opacity: 0.4 });
+    const linea = new THREE.Line(geom, mat);
+    grupoImanes.add(linea);
+    lineasIman.push(linea);
+  }
+}
+
+// -----------------------------------------------------
 // Switch de rango de tiempo (corto/medio/largo). Cambiar de modo vacia el
 // historial que ya estaba armado -- las filas viejas fueron construidas
 // con el ticksPorFila ANTERIOR, asi que mezclarlas con las nuevas haria
@@ -926,6 +1122,8 @@ function limpiarHistorial() {
     lineaTrades.material.dispose();
     lineaTrades = null;
   }
+  limpiarImanes();
+  for (const et of etiquetasIceberg) et.element.style.display = "none";
 }
 
 const contenedorBotonesTiempo = document.getElementById("controles-tiempo");
@@ -965,6 +1163,72 @@ contenedorBotonesTiempo.addEventListener("click", (ev) => {
   const boton = ev.target.closest("button");
   if (!boton) return;
   seleccionarPresetTiempo(Number(boton.dataset.idx));
+});
+
+// -----------------------------------------------------
+// Switch de zoom de PRECIO (ver recortarNivelesPorZoom mas arriba). Igual
+// que el switch de tiempo, cambiar de preset vacia el historial: las filas
+// ya dibujadas quedaron armadas con el ESCALA_X viejo (calculado para OTRA
+// cantidad de buckets), asi que no se pueden reescalar in-place -- es mas
+// prolijo arrancar de cero, cosa que ya hace limpiarHistorial().
+// -----------------------------------------------------
+const contenedorBotonesZoomPrecio = document.getElementById("controles-zoom-precio");
+ZOOM_PRECIO_PRESETS.forEach((preset, idx) => {
+  const boton = document.createElement("button");
+  boton.type = "button";
+  boton.textContent = preset.label;
+  boton.dataset.idx = String(idx);
+  boton.classList.toggle("activo", idx === zoomPrecioIdx);
+  contenedorBotonesZoomPrecio.appendChild(boton);
+});
+function seleccionarZoomPrecio(idx) {
+  if (idx === zoomPrecioIdx) return;
+  zoomPrecioIdx = idx;
+  ESCALA_X = null; // se recalcula para el nuevo ancho de ventana visible
+  limpiarHistorial();
+  contenedorBotonesZoomPrecio.querySelectorAll("button").forEach((b, i) => {
+    b.classList.toggle("activo", i === zoomPrecioIdx);
+  });
+}
+contenedorBotonesZoomPrecio.addEventListener("click", (ev) => {
+  const boton = ev.target.closest("button");
+  if (!boton) return;
+  seleccionarZoomPrecio(Number(boton.dataset.idx));
+});
+
+// -----------------------------------------------------
+// Switch de mercado (spot / futuros). Un click manda el pedido al server
+// (ver mensaje {tipo:"mercado"}) -- el cambio real de estado (limpiar
+// historial, resetear escalas de color) pasa recien cuando llega el
+// primer tick con data.mercado distinto del conocido, ver ws.onmessage,
+// para que quede sincronizado con lo que el server realmente esta
+// mandando y no con lo que el usuario clickeo (si el cambio de conexion
+// tarda un toque, mejor esperar el dato real que asumir).
+// -----------------------------------------------------
+const MERCADOS_UI = [
+  { id: "spot", label: "Spot" },
+  { id: "futuros", label: "Futuros" },
+];
+let mercadoConocido = null;
+const contenedorBotonesMercado = document.getElementById("controles-mercado");
+MERCADOS_UI.forEach((m) => {
+  const boton = document.createElement("button");
+  boton.type = "button";
+  boton.textContent = m.label;
+  boton.dataset.id = m.id;
+  contenedorBotonesMercado.appendChild(boton);
+});
+function actualizarBotonesMercado() {
+  contenedorBotonesMercado.querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("activo", b.dataset.id === mercadoConocido);
+  });
+}
+contenedorBotonesMercado.addEventListener("click", (ev) => {
+  const boton = ev.target.closest("button");
+  if (!boton) return;
+  const id = boton.dataset.id;
+  if (id === mercadoConocido) return;
+  enviarAlServer({ tipo: "mercado", valor: id });
 });
 
 // -----------------------------------------------------
@@ -1086,12 +1350,28 @@ function conectar() {
     if (data.tipo === "config") {
       if (data.symbol) elSimbolo.textContent = data.symbol;
       if (data.intervaloMs) INTERVALO_S = data.intervaloMs / 1000;
+      if (data.mercado) { mercadoConocido = data.mercado; actualizarBotonesMercado(); }
       recalcularTicksPorFila();
       actualizarBotonesTiempo();
       reconstruirEjeTiempo();
       return;
     }
     if (data.tipo !== "tick") return;
+
+    // Cambio de mercado confirmado por el server (distinto del ultimo tick
+    // conocido): spot y futuros son libros completamente distintos, asi que
+    // hay que vaciar historial + resetear la escala de color adaptativa
+    // (si no, con volumenes tipicamente distintos entre mercados, tarda en
+    // adaptarse y todo se ve mal calibrado un rato) -- el centro tambien se
+    // resetea para no arrastrar un delta de recentrado que no corresponde.
+    if (data.mercado && data.mercado !== mercadoConocido) {
+      mercadoConocido = data.mercado;
+      actualizarBotonesMercado();
+      techoColorBid = 1;
+      techoColorAsk = 1;
+      ultimoCentroConocido = null;
+      limpiarHistorial();
+    }
 
     if (data.binance === "demo") {
       elEstado.textContent = "demo (sin Binance)";
@@ -1123,6 +1403,12 @@ function conectar() {
     // oscila libre adentro de esa ventana, ver orderbook.js).
     const centroVentana = data.centro ?? precioActual;
 
+    // Recorte por el zoom de precio (ver recortarNivelesPorZoom): de aca en
+    // mas, todo lo que dibuja algo en pantalla usa nivelesVisibles, NUNCA
+    // data.niveles directo -- el server sigue mandando el rango completo
+    // (RANGO_BUCKETS) siempre, esto solo decide cuanto de eso se pinta.
+    const nivelesVisibles = recortarNivelesPorZoom(data.niveles);
+
     // CORRECCION DE RE-CENTRADO (fix del escalon falso en el historial):
     // cada fila de historial se dibuja con sus paredes centradas en el
     // ancla que tenia el server EN ESE MOMENTO (centroVentana). Cuando el
@@ -1140,6 +1426,7 @@ function conectar() {
       const deltaX = ((centroVentana - ultimoCentroConocido) / bucketSize) * ESCALA_X;
       for (const f of filas) f.position.x -= deltaX;
       for (const b of burbujas) b.mesh.position.x -= deltaX;
+      for (const l of lineasIman) l.position.x -= deltaX;
     }
     ultimoCentroConocido = centroVentana;
 
@@ -1149,11 +1436,13 @@ function conectar() {
     contadorTicksHistorial++;
     if (data.trades && data.trades.length) tradesAcumulados.push(...data.trades);
     if (contadorTicksHistorial % ticksPorFila === 0) {
-      agregarTickAlHistorial(data.niveles, tradesAcumulados);
+      agregarTickAlHistorial(nivelesVisibles, tradesAcumulados);
       tradesAcumulados = [];
     }
-    actualizarEtiquetasPrecio(data.niveles);
-    actualizarDOM(data.niveles);
+    actualizarEtiquetasPrecio(nivelesVisibles);
+    const alturasDOM = actualizarDOM(nivelesVisibles);
+    actualizarIcebergs(data.icebergs, nivelesVisibles, alturasDOM);
+    actualizarImanes(data.imanes, nivelesVisibles);
 
     if (data.gex) {
       const millones = data.gex.netGEX / 1e6;

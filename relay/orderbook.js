@@ -17,7 +17,16 @@
 // bids/asks se guardan como Map(precio -> cantidad). Cantidad 0 = borrar.
 
 export class OrderBook {
-  constructor() {
+  /**
+   * @param {{esFuturos?: boolean}} opciones - esFuturos cambia la regla de
+   * continuidad que usa aplicarEventoDepth: spot valida con "U" (debe ser
+   * exactamente lastUpdateId+1), futuros valida con "pu" (previous update
+   * id, tiene que matchear el "u" del evento anterior aplicado) -- son
+   * streams distintos de Binance con formatos de sync ligeramente
+   * distintos, ver docs oficiales de cada uno.
+   */
+  constructor(opciones = {}) {
+    this.esFuturos = !!opciones.esFuturos;
     this.bids = new Map(); // precio -> qty
     this.asks = new Map();
     this.lastUpdateId = 0;
@@ -73,8 +82,17 @@ export class OrderBook {
         return "gap";
       }
       this.primerEventoAplicado = true;
+    } else if (this.esFuturos) {
+      // Futuros (USD-M): la continuidad se valida con "pu" (previous update
+      // id del evento), que tiene que ser EXACTAMENTE el "u" del evento
+      // anterior aplicado -- "U" en futuros no sirve para esto (a
+      // diferencia de spot).
+      if (evento.pu !== this.lastUpdateId) {
+        this.desincronizado = true;
+        return "gap";
+      }
     } else {
-      // Continuidad estricta: el U de cada evento nuevo debe ser
+      // Spot: continuidad estricta, el U de cada evento nuevo debe ser
       // exactamente lastUpdateId + 1. Si no, se perdio un evento.
       if (evento.U !== this.lastUpdateId + 1) {
         this.desincronizado = true;

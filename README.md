@@ -151,6 +151,52 @@ colores, cámara, etc. sin gastar la conexión real.
   **+ / −** abajo a la derecha de la pantalla, pensados como alternativa
   cuando el zoom con rueda se siente errático (varía mucho según el mouse
   y el sistema operativo).
+- **Zoom de PRECIO** (`Rango amplio / Medio / Detalle`, abajo a la
+  izquierda): distinto del zoom de cámara de arriba — en vez de acercar la
+  cámara a toda la escena, esto recorta cuántos buckets de precio se
+  dibujan alrededor del centro de la ventana y reparte el mismo ancho de
+  escena entre menos buckets, que quedan más separados entre sí. Sirve
+  para pasar de ver, por ejemplo, $62.500–$67.500 a ver $64.300–$65.700
+  con mucha más separación visual entre niveles vecinos, sin perder
+  precisión de datos (el server sigue mandando el rango completo siempre;
+  esto es puramente un recorte visual del lado del navegador). Cambiar de
+  preset vacía el historial que ya estaba armado (igual que el switch de
+  tiempo) porque las filas viejas quedaron dibujadas a otra escala.
+- **Spot / Futuros** (abajo a la izquierda): switch para elegir contra qué
+  mercado de Binance conectarse — spot o futuros USD-M. A propósito corre
+  **uno solo a la vez** (no los dos en simultáneo, que sería el doble de
+  conexión + book en memoria + costo de agregado por tick para nada).
+  Cambiar el switch corta la conexión actual y arranca un book nuevo desde
+  cero contra el otro endpoint — historial y escala de color se resetean
+  porque son dos books completamente distintos. `MERCADO_INICIAL` en el
+  `.env` define con cuál arranca el server.
+- **Posibles órdenes iceberg** 🧊: heurística que detecta un nivel que se
+  consume por un trade real y vuelve a aparecer con un tamaño similar
+  varias veces seguidas — la firma típica de un iceberg (solo se muestra
+  una fracción del tamaño real, y se va "recargando" a medida que se
+  ejecuta). Se marca con un pequeño badge magenta 🧊 sobre la barra del DOM
+  en vivo correspondiente. Es una heurística de mejor esfuerzo (mismo
+  espíritu que el estimador de GEX): una señal para investigar, no una
+  certeza. Ajustable con las variables `ICEBERG_*` (ver `.env.example`).
+- **Imanes**: niveles cuyo tamaño se sostuvo grande de forma consistente
+  en el tiempo (EMA lenta, no el tick actual) — candidatos a zona de
+  posible absorción o soporte/resistencia. Se dibujan como un riel
+  violeta fino que atraviesa todo el historial visible en ese nivel de
+  precio, para que se note que es algo que se sostuvo en el tiempo y no
+  un pico puntual. También heurística de mejor esfuerzo, ajustable con
+  `IMAN_*`.
+- **Big trades**: los trades cuyo nocional (precio × cantidad) supera
+  `UMBRAL_BIG_TRADE_USD` (30.000 USD por default, se ajusta directo en
+  `frontend/index.html`) se resaltan distinto tanto en la burbuja
+  (más grande y más brillante) como en la marca que dejan sobre la pared
+  del historial (color celeste/blanco en vez del amarillo/naranja normal,
+  y un poco más alta — como un "pico" entre las marcas comunes).
+- **Marcador de entrada de mercado un poco más alto**: las burbujas de
+  trade (que representan cada ejecución real) se elevaron un poco sobre su
+  propia pared (`MARGEN_BURBUJA`) porque a veces quedaban tapadas por una
+  pared vecina más alta — a propósito un ajuste moderado, no una altura
+  fija grande (eso ya se probó antes y quedaba "flotando" desconectado de
+  su pared).
 - **Más brillo en las paredes lejanas**: se empujó el punto donde empieza
   la niebla (fog) de la escena, así el historial que quedó más atrás en
   el tiempo no se apaga tan rápido.
@@ -176,6 +222,19 @@ o directo en Render:
 - `GEX_INTERVALO_MS` — cada cuánto se recalcula el gamma exposure desde
   Deribit (default 60000 = 60s; no hace falta bajarlo mucho, el open
   interest de opciones no cambia tan rápido).
+- `MERCADO_INICIAL` — `spot` o `futuros`, con cuál arranca el server (el
+  frontend puede cambiarlo en caliente después con el switch Spot/Futuros).
+- `ICEBERG_ACTIVADO` / `ICEBERG_DISTANCIA_USD` / `ICEBERG_CAIDA_MINIMA` /
+  `ICEBERG_REFILL_MINIMO` / `ICEBERG_VENTANA_REFILL_MS` /
+  `ICEBERG_REFILLS_PARA_FLAG` / `ICEBERG_EXPIRA_MS` / `ICEBERG_QTY_MINIMA`
+  — parámetros del detector de posibles icebergs (ver `.env.example` para
+  el significado de cada uno y los defaults). Si aparecen muchos falsos
+  positivos, subir `ICEBERG_REFILLS_PARA_FLAG` o `ICEBERG_REFILL_MINIMO`
+  es el primer dial para probar.
+- `IMAN_ACTIVADO` / `IMAN_ALPHA` / `IMAN_FACTOR` / `IMAN_MAX_ENVIADOS` /
+  `IMAN_QTY_MINIMA` — parámetros del detector de imanes. `IMAN_ALPHA` más
+  chico = un nivel tiene que sostenerse más tiempo para contar; `IMAN_
+  FACTOR` más alto = más exigente (menos imanes, pero más "reales").
 
 ## Precisión: qué cambió
 
@@ -276,3 +335,17 @@ funciona y dispara un redeploy solo.
 - Se podría sumar un segundo símbolo (ej. ETHUSDT) corriendo en paralelo,
   pero eso ya es un cambio de alcance — avisame si lo querés y lo
   planificamos aparte.
+- **Icebergs / imanes: primer pass, a calibrar en vivo.** Los umbrales de
+  `ICEBERG_*` / `IMAN_*` se eligieron a criterio, sin poder probarlos
+  contra el book real de Binance (el iceberg en particular necesita
+  eventos de depth reales — en modo demo el book se reemplaza entero en
+  cada tick, así que ese detector nunca dispara ahí, solo con Binance de
+  verdad). Es normal que las primeras sesiones en vivo salgan con
+  demasiados o muy pocos avisos — avisame qué tal se ve y ajustamos los
+  números.
+- **Futuros: la lógica de sincronización (`pu` en vez de `U`) sigue el
+  método oficial de Binance para el stream de futuros, pero recién se
+  probó en modo demo** (esta sandbox no tiene salida de red a Binance) —
+  la primera vez que lo corras en vivo contra futuros, fijate en la
+  consola si aparecen mensajes de "gap detectado" muy seguido; si pasa,
+  avisame.
